@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+state/*.tmp
+state/state.json
+config.py
+*.log
