@@ -7,9 +7,9 @@ name: Flat hunt
 on:
   schedule:
     # Backup only. GitHub's schedule is best-effort and often skips hours, so the
-    # real trigger is an hourly cron-job.org call to workflow_dispatch (see README).
+    # real trigger is a cron-job.org call to workflow_dispatch every 30 min (see README).
     # Odd minutes dodge the :00/:30 rush that GitHub drops first.
-    - cron: "37 5-22 * * *"
+    - cron: "17,47 5-22 * * *"
   workflow_dispatch:
     inputs:
       args:
