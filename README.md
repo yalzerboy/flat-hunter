@@ -1,6 +1,6 @@
 # Flat hunter
 
-Watches a Rightmove search every 30 minutes (GitHub Actions), drops only listings
+Watches a Rightmove search every hour (GitHub Actions), drops only listings
 that objectively break a dealbreaker, has Claude read every remaining listing
 (text, floorplan, photos) and posts to a Telegram group:
 
@@ -36,3 +36,17 @@ Opus re-reads any Haiku scores 5+ or is unsure about outdoor space.
 
 ## Manual runs
 Actions tab > Flat hunt > Run workflow, with args like `--backfill 3` or `--digest-now`.
+
+## Schedule
+GitHub's own `schedule:` trigger is best-effort and regularly skips hours, so the
+hourly run is started from outside by a cron-job.org job (06:00-23:00 London):
+
+- `POST https://api.github.com/repos/yalzerboy/flat-hunter/actions/workflows/hunt.yml/dispatches`
+- Headers: `Authorization: Bearer <token>`, `Accept: application/vnd.github+json`,
+  `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`
+- Body: `{"ref":"main"}` (GitHub answers `204 No Content`)
+- Token: fine-grained PAT, this repo only, permission **Actions: Read and write**.
+
+The `schedule:` in `hunt.yml` stays as a backup at :37; `concurrency` stops overlapping
+runs. A run after a gap catches up by itself: it walks newest-first until a whole page
+of listings is already known.
