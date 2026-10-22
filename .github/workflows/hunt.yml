@@ -6,29 +6,56 @@ name: Flat hunt
 
 on:
   schedule:
-    # Backup only. GitHub's schedule is best-effort and often skips hours, so the
-    # real trigger is a cron-job.org call to workflow_dispatch every 30 min (see README).
-    # Odd minutes dodge the :00/:30 rush that GitHub drops first.
-    - cron: "17,47 5-22 * * *"
+    # Only restarts a broken chain; the checks themselves are timed by keeper.sh.
+    # GitHub's schedule is best-effort (it skipped nine hours on 21 Oct), so it
+    # can't be the clock. A run that finds the chain alive exits in seconds.
+    - cron: "17,47 * * * *"
   workflow_dispatch:
     inputs:
       args:
-        description: "Extra args, e.g. --backfill 3 or --digest-now"
+        description: "One-off run with these args, e.g. --backfill 3 or --digest-now (empty = start the loop)"
+        required: false
+        default: ""
+      chain:
+        description: "Set by keeper.sh when it starts its successor"
         required: false
         default: ""
 
-concurrency:
-  group: flat-hunt
-  cancel-in-progress: false
-
 permissions:
   contents: write
+  actions: write
 
 jobs:
-  hunt:
+  # A scheduled run only goes ahead when no loop is running or waiting.
+  guard:
     if: github.repository == 'yalzerboy/flat-hunter'   # forks don't run it
     runs-on: ubuntu-latest
-    timeout-minutes: 240   # normal runs take 1-3 min; backfills can take a couple of hours
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          go=true
+          if [ "${{ github.event_name }}" = schedule ]; then
+            others=$(gh api "repos/${{ github.repository }}/actions/workflows/hunt.yml/runs?per_page=30" \
+              --jq '[.workflow_runs[] | select(.id != ${{ github.run_id }})
+                     | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "pending")] | length')
+            [ "$others" -gt 0 ] && go=false
+          fi
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+          echo "go=$go"
+
+  hunt:
+    needs: guard
+    if: needs.guard.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355   # GitHub's limit is 360; keeper.sh hands over before this
+    concurrency:
+      group: flat-hunt
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +79,7 @@ jobs:
 
       - name: Hunt
         env:
+          GH_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -59,6 +87,9 @@ jobs:
           ARGS: ${{ github.event.inputs.args }}
         # Output stays out of the public log.
         run: |
+          git config user.name "flat-hunter"
+          git config user.email "flat-hunter@users.noreply.github.com"
+          if [ -z "$ARGS" ]; then exec ./keeper.sh; fi
           set +e
           python hunter.py $ARGS > run.log 2>&1
           rc=$?
@@ -88,8 +119,6 @@ jobs:
           # Encryption is salted, so only re-encrypt when the state really changed.
           if [ -f "$RUNNER_TEMP/state.sha" ] && sha256sum -c --quiet "$RUNNER_TEMP/state.sha" 2>/dev/null; then exit 0; fi
           ./crypt.sh enc state/state.json state/state.json.enc
-          git config user.name "flat-hunter"
-          git config user.email "flat-hunter@users.noreply.github.com"
           git add state/state.json.enc
           git diff --cached --quiet || git commit -q -m "state $(date -u +%FT%TZ)"
           git pull -q --rebase && git push -q

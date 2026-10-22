@@ -38,15 +38,19 @@ Opus re-reads any Haiku scores 5+ or is unsure about outdoor space.
 Actions tab > Flat hunt > Run workflow, with args like `--backfill 3` or `--digest-now`.
 
 ## Schedule
-GitHub's own `schedule:` trigger is best-effort and regularly skips hours, so the
-runs are started from outside by a cron-job.org job at :05 and :35, 06:00-23:35 London:
+GitHub's own `schedule:` trigger is best-effort and skipped up to nine hours at a time, so
+it is not the clock. Instead one job stays up and runs a check itself at :05 and :35,
+06:05-23:35 London (`keeper.sh`). Before the job's 6-hour limit it starts its own successor
+with `workflow_dispatch` (GITHUB_TOKEN may start dispatch runs), so the chain runs with no
+outside service and no extra token. The repo is public, so the minutes are free.
 
-- `POST https://api.github.com/repos/yalzerboy/flat-hunter/actions/workflows/hunt.yml/dispatches`
-- Headers: `Authorization: Bearer <token>`, `Accept: application/vnd.github+json`,
-  `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`
-- Body: `{"ref":"main"}` (GitHub answers `204 No Content`)
-- Token: fine-grained PAT, this repo only, permission **Actions: Read and write**.
-
-The `schedule:` in `hunt.yml` stays as a backup at :17 and :47; `concurrency` stops overlapping
-runs. A run after a gap catches up by itself: it walks newest-first until a whole page
-of listings is already known.
+- The `schedule:` (`17,47 * * * *`) only restarts a broken chain: a scheduled run that finds a
+  loop running or waiting exits in seconds.
+- `concurrency` stops two loops overlapping; a duplicate just waits or is dropped.
+- After 3 failed checks in a row the bot posts a warning to the Telegram group.
+- A check after a gap catches up by itself: it walks newest-first until a whole page of
+  listings is already known.
+- One-off runs: `gh workflow run hunt.yml -f args="--digest-now"`. With empty args a manual
+  run starts the loop (use it to restart the chain by hand).
+- `./logs.sh` reads the log of the last loop that handed over; the loop that is running
+  uploads its log when it hands over.
