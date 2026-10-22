@@ -58,6 +58,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main   # not the commit this run was queued at: the state must be the latest
 
       - uses: actions/setup-python@v5
         with:
@@ -114,11 +116,4 @@ jobs:
         if: always()
         env:
           STATE_KEY: ${{ secrets.STATE_KEY }}
-        run: |
-          [ -f state/state.json ] || exit 0
-          # Encryption is salted, so only re-encrypt when the state really changed.
-          if [ -f "$RUNNER_TEMP/state.sha" ] && sha256sum -c --quiet "$RUNNER_TEMP/state.sha" 2>/dev/null; then exit 0; fi
-          ./crypt.sh enc state/state.json state/state.json.enc
-          git add state/state.json.enc
-          git diff --cached --quiet || git commit -q -m "state $(date -u +%FT%TZ)"
-          git pull -q --rebase && git push -q
+        run: ./keeper.sh --save-only

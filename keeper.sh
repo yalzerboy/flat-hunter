@@ -7,6 +7,7 @@
 # chain.
 #
 # Called by hunt.yml with config.py and state/state.json already unpacked.
+# `./keeper.sh --save-only` just pushes the state (the workflow's last step).
 # All hunter output goes to run.log, never to the public Actions log.
 set -uo pipefail
 
@@ -33,20 +34,39 @@ while True:
 PY
 }
 
+# The state on origin/main is the truth. The job's checkout can be older than it
+# (a run that waited in the queue sees the commit it was started from), and a
+# stale state means re-posting flats that were already sent.
+state_unsaved() {
+  [ -f state/state.json ] && ! { [ -f "$RUNNER_TEMP/state.sha" ] && sha256sum -c --quiet "$RUNNER_TEMP/state.sha" >/dev/null 2>&1; }
+}
+
+sync_state() {
+  state_unsaved && return 0   # our newer state wins; the next save pushes it over the top
+  git fetch -q origin main || return 0
+  local remote; remote=$(git rev-parse -q --verify origin/main:state/state.json.enc) || return 0
+  [ "$remote" = "$(git rev-parse -q --verify HEAD:state/state.json.enc)" ] && return 0
+  git reset -q origin/main && git checkout -q -- state/state.json.enc \
+    && ./crypt.sh dec state/state.json.enc state/state.json \
+    && sha256sum state/state.json > "$RUNNER_TEMP/state.sha" && echo "picked up newer state from main"
+}
+
 save_state() {
-  [ -f state/state.json ] || return 0
-  if [ -f "$RUNNER_TEMP/state.sha" ] && sha256sum -c --quiet "$RUNNER_TEMP/state.sha" 2>/dev/null; then return 0; fi
+  state_unsaved || return 0
   ./crypt.sh enc state/state.json state/state.json.enc
-  git add state/state.json.enc
-  git diff --cached --quiet || git commit -q -m "state $(date -u +%FT%TZ)"
   for i in 1 2 3 4 5; do
-    if git pull -q --rebase && git push -q; then
+    # Commit only the state file on top of the latest main (never this checkout's older code).
+    if git fetch -q origin main && git reset -q origin/main && git add state/state.json.enc \
+       && { git diff --cached --quiet || git commit -q -m "state $(date -u +%FT%TZ)"; } \
+       && git push -q origin HEAD:main; then
       sha256sum state/state.json > "$RUNNER_TEMP/state.sha"; return 0
     fi
     sleep $((i * 10))
   done
   echo "::warning::state push failed; will retry after the next check"
 }
+
+if [ "${1:-}" = "--save-only" ]; then save_state; exit 0; fi
 
 warn_telegram() {
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || return 0
@@ -57,6 +77,7 @@ warn_telegram() {
 check() {
   local h; h=$((10#$(london +%H)))
   if [ "$h" -lt "$FIRST_HOUR" ]; then return 0; fi
+  sync_state >> run.log 2>&1
   echo "===== check $(london '+%F %H:%M %Z')" >> run.log
   timeout 60m python hunter.py >> run.log 2>&1
   local rc=$?
