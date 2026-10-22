@@ -53,7 +53,9 @@ sync_state() {
 
 save_state() {
   state_unsaved || return 0
-  ./crypt.sh enc state/state.json state/state.json.enc
+  if ! ./crypt.sh enc state/state.json state/state.json.enc; then
+    echo "::error::could not encrypt the state (is STATE_KEY set?)"; return 1
+  fi
   for i in 1 2 3 4 5; do
     # Commit only the state file on top of the latest main (never this checkout's older code).
     if git fetch -q origin main && git reset -q origin/main && git add state/state.json.enc \
@@ -66,7 +68,8 @@ save_state() {
   echo "::warning::state push failed; will retry after the next check"
 }
 
-if [ "${1:-}" = "--save-only" ]; then save_state; exit 0; fi
+if [ -z "${STATE_KEY:-}" ]; then echo "::error::STATE_KEY is not set; refusing to run checks it cannot save"; exit 1; fi
+if [ "${1:-}" = "--save-only" ]; then save_state; exit $?; fi
 
 warn_telegram() {
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || return 0
@@ -82,7 +85,7 @@ check() {
   timeout 60m python hunter.py >> run.log 2>&1
   local rc=$?
   echo "===== exit $rc" >> run.log
-  save_state
+  if ! save_state && [ "$rc" -eq 0 ]; then rc=99; fi   # an unsaved check re-posts its flats next time
   if [ "$rc" -eq 0 ]; then
     echo "check $(date -u +%H:%MZ): ok"; fails=0
   else
