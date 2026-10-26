@@ -24,6 +24,9 @@ shape, so filtering, commutes, scoring and messages are the same for all of them
   (unzipped size plus 8 KB per request, retries included); real use is a fraction of it.
   Hitting the day or month cap posts one notice and pauses only those two sites. Errors never
   carry the proxy's credentials. A normal check is about 1-2 MB on the meter.
+  Zoopla refuses most of the pool's exits, so `PROXY_URL` carries `{session}`
+  (`user:pass_country-GB_session-{session}_lifetime-1440@host:port`): a 403 moves to a fresh
+  exit (up to 12 tries, ~14 KB each on the meter) and one that works is kept across checks.
 - **The same flat on two sites** (same bedrooms, rent within 2%, map pins within 250 m) is
   scored once. The copy is listed in the 6pm digest with both links, so a wrong match is visible.
 - **A site's first run** scores what it listed in the last 3 days and records the rest.

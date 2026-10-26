@@ -74,7 +74,12 @@ _browser = None
 PROXY_HOSTS = {"www.zoopla.co.uk", "www.openrent.co.uk"}
 PROXY_CAP_MB = {"check": 25, "day": 150, "month": 2000}
 REQUEST_OVERHEAD = 8 * 1024
-meter = {"day": "", "month": "", "check": 0, "day_bytes": 0, "month_bytes": 0}
+# Zoopla's Cloudflare refuses most of the pool's UK exits (26 Oct: 7 of 8 got 403) but
+# not all. PROXY_URL may carry "{session}" (Evomi: user:pass_country-GB_session-{session}
+# _lifetime-1440@host:port) so a 403 tries a fresh exit, and one that works is kept,
+# across checks, until it stops working.
+EXIT_TRIES = 12
+meter = {"day": "", "month": "", "check": 0, "day_bytes": 0, "month_bytes": 0, "session": ""}
 
 
 class ProxyCapReached(Exception):
@@ -104,11 +109,20 @@ def _check_budget():
                                   f"of {PROXY_CAP_MB[scope]} MB, counted generously)")
 
 
-def _redact(e):
+def _proxy():
+    url = os.environ.get("PROXY_URL") or ""
+    if "{session}" not in url:
+        return url
+    if not meter.get("session"):
+        meter["session"] = "fh" + os.urandom(4).hex()
+    return url.replace("{session}", meter["session"])
+
+
+def _redact(e, proxy):
     """Never let the proxy's credentials reach a log or a Telegram message."""
     s = str(e)
-    for secret in filter(None, [os.environ.get("PROXY_URL"),
-                                urllib.parse.urlsplit(os.environ.get("PROXY_URL", "")).password]):
+    for secret in filter(None, [proxy, urllib.parse.urlsplit(proxy).password,
+                                urllib.parse.urlsplit(proxy).username]):
         s = s.replace(secret, "***")
     return RuntimeError(re.sub(r"//[^@/\s]+@", "//***@", s))
 
@@ -121,21 +135,23 @@ def browser_get(url, proxied=False, tries=3):
     from curl_cffi import requests as cf
     if _browser is None:
         _browser = cf.Session(impersonate="safari17_2_ios")
-    proxy = os.environ.get("PROXY_URL") if proxied else None
+    proxy = _proxy() if proxied else None
     if proxy and urllib.parse.urlsplit(url).hostname not in PROXY_HOSTS:
         raise RuntimeError(f"refusing to proxy {urllib.parse.urlsplit(url).hostname}: not in PROXY_HOSTS")
-    kw = {"proxies": {"http": proxy, "https": proxy}} if proxy else {}
-    for attempt in range(tries):
+    sticky = proxy and "{session}" in os.environ.get("PROXY_URL", "")
+    attempt = refused = 0
+    while True:
+        kw = {"proxies": {"http": proxy, "https": proxy}} if proxy else {}
         if proxy:
             _check_budget()
+        r = None
         try:
             try:
                 r = _browser.get(url, timeout=40, headers={"Accept-Language": "en-GB,en;q=0.9"}, **kw)
             finally:
                 if proxy:  # charged whether or not it worked
-                    got = locals().get("r")
-                    _charge(REQUEST_OVERHEAD + (len(got.content) + sum(len(k) + len(v) for k, v in got.headers.items())
-                                                if got is not None else 0))
+                    _charge(REQUEST_OVERHEAD + (len(r.content) + sum(len(k) + len(v) for k, v in r.headers.items())
+                                                if r is not None else 0))
             if r.status_code in (404, 410):
                 raise LookupError(f"{r.status_code} {url}")
             if r.status_code == 200:
@@ -144,8 +160,14 @@ def browser_get(url, proxied=False, tries=3):
         except LookupError:
             raise
         except Exception as e:  # curl errors, proxy hiccups
-            err = _redact(e) if proxy else e
-        if attempt == tries - 1:
+            err = _redact(e, proxy) if proxy else e
+        if sticky and "HTTP 403" in str(err) and refused < EXIT_TRIES - 1:
+            refused += 1  # this exit is blocked: drop it and try another straight away
+            meter["session"] = ""
+            proxy = _proxy()
+            continue
+        attempt += 1
+        if attempt >= tries:
             raise err
         # A 429 means slow down properly; anything else is worth a quick retry.
         time.sleep((30 if "429" in str(err) else 4) * (attempt + 1))
