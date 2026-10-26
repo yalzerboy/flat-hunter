@@ -1,10 +1,12 @@
-"""Flat hunter: watch a Rightmove search, filter, score with Claude, post to Telegram.
+"""Flat hunter: watch Rightmove, OnTheMarket, Zoopla and OpenRent, filter, score with
+Claude, post to Telegram.
 
 Run modes:
   python hunter.py                 normal run (what the cron does)
   python hunter.py --backfill 3    treat listings from the last 3 days as new
   python hunter.py --dry-run       print messages instead of sending them
   python hunter.py --digest-now    send the daily digest immediately
+  python hunter.py --only zp:123   score these listings and post them (Rightmove ids are bare)
 """
 
 import argparse
@@ -17,7 +19,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from html import escape as html_escape
@@ -28,97 +29,16 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field
 
 import config
+import sources
+from sources import get, km
 
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/129.0 Safari/537.36")
 LONDON = ZoneInfo("Europe/London")
 STATE_PATH = Path(__file__).parent / "state" / "state.json"
-MAX_PAGES = 12          # 24 per page; a normal 30-min run needs 1
-POLITE_DELAY = 1.5      # seconds between Rightmove requests
-MAX_NEW_PER_RUN = 60    # a normal 30-min window has ~2; more means stale state
-
-
-# --------------------------------------------------------------------- HTTP
-
-def get(url, headers=None, binary=False, tries=3):
-    for attempt in range(tries):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                data = r.read()
-                return data if binary else data.decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            if e.code in (404, 410):
-                raise
-            if attempt == tries - 1:
-                raise
-        except urllib.error.URLError:
-            if attempt == tries - 1:
-                raise
-        time.sleep(3 * (attempt + 1))
-
-
-# --------------------------------------------------------------- Rightmove
-
-def search_page(index):
-    html = get(config.SEARCH_URL + f"&index={index}")
-    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
-    if not m:
-        raise RuntimeError("Rightmove search page changed shape (no __NEXT_DATA__)")
-    sr = json.loads(m.group(1))["props"]["pageProps"]["searchResults"]
-    return sr["properties"], int(str(sr["resultCount"]).replace(",", ""))
-
-
-def page_model(html):
-    """Listing pages ship their data as a reference-encoded array; inflate it."""
-    marker = "window.__PAGE_MODEL = "
-    i = html.find(marker)
-    if i < 0:
-        return None
-    pm, _ = json.JSONDecoder().raw_decode(html, i + len(marker))
-    arr = json.loads(pm["data"])
-    memo = {}
-
-    def dec(i):
-        if i in memo:
-            return memo[i]
-        if i < 0:
-            return None
-        v = arr[i]
-        if isinstance(v, dict):
-            o = memo[i] = {}
-            for k, j in v.items():
-                o[k] = dec(j)
-            return o
-        if isinstance(v, list):
-            o = memo[i] = []
-            o.extend(dec(j) for j in v)
-            return o
-        return v
-
-    return dec(0)
-
-
-def listing_detail(pid):
-    pm = page_model(get(f"https://www.rightmove.co.uk/properties/{pid}"))
-    if not pm or "propertyData" not in pm:
-        raise RuntimeError(f"listing {pid}: no page model")
-    return pm["propertyData"]
-
-
-def monthly(p):
-    amt, freq = p["price"]["amount"], (p["price"].get("frequency") or "monthly").lower()
-    if freq == "weekly":
-        return round(amt * 52 / 12)
-    if freq == "daily":
-        return round(amt * 365 / 12)
-    return amt
-
-
-def strip_html(s):
-    s = re.sub(r"<br\s*/?>", "\n", s or "")
-    s = re.sub(r"<[^>]+>", "", s)
-    return re.sub(r"\n{3,}", "\n\n", s).strip()
+MAX_PAGES = 12          # 24-30 per page; a normal 30-min run needs 1
+MAX_NEW_PER_RUN = 60    # a normal 30-min window has ~2 per site; more means stale state
+NEW_SOURCE_DAYS = 3     # a site's first run scores what it listed this recently, records the rest
+DUPE_KM = 0.25          # same flat on two sites: same beds, same rent (±2%), pins this close
+SOURCE_WARN_AFTER = 6   # failed checks in a row (3 hours) before a site's failure is posted
 
 
 # ------------------------------------------------------------ Hard filters
@@ -209,13 +129,6 @@ def bike_minutes(lat1, lon1, lat2, lon2):
     except Exception as e:
         print(f"  bike routing failed ({e})", file=sys.stderr)
         return None
-
-
-def km(lat1, lon1, lat2, lon2):
-    import math
-    dx = (lon2 - lon1) * 69.0 * math.cos(math.radians(lat1)) * 1.609
-    dy = (lat2 - lat1) * 69.0 * 1.609
-    return math.hypot(dx, dy)
 
 
 def his_commute(lat, lon):
@@ -334,14 +247,11 @@ How to judge:
 """
 
 
-def download_images(pd, folder):
-    paths = []
-    for n, fp in enumerate((pd.get("floorplans") or [])[:3], 1):
-        if fp.get("type", "IMAGE") == "IMAGE" and fp.get("url"):
-            paths.append((f"Floorplan {n}", fp["url"], folder / f"floorplan{n}.jpeg"))
-    for n, im in enumerate((pd.get("images") or [])[:config.MAX_PHOTOS], 1):
-        url = (im.get("resizedImageUrls") or {}).get(config.PHOTO_SIZE) or im.get("url")
-        paths.append((f"Photo {n}", url, folder / f"photo{n:02d}.jpeg"))
+def download_images(d, folder):
+    paths = [(f"Floorplan {n}", url, folder / f"floorplan{n}.jpeg")
+             for n, url in enumerate(d["floorplans"][:3], 1)]
+    paths += [(f"Photo {n}", url, folder / f"photo{n:02d}.jpeg")
+              for n, url in enumerate(d["photos"][:config.MAX_PHOTOS], 1)]
     out = []
     for label, url, path in paths:
         try:
@@ -403,19 +313,20 @@ def needs_second_look(s):
     return s is None or s.score >= config.ESCALATE_MIN_SCORE or s.outdoor_space == "unclear"
 
 
-def score_listing(pd, facts, notes):
+def score_listing(d, facts, notes):
     """Returns (Score or None, which model produced it)."""
     with tempfile.TemporaryDirectory(prefix="flat-") as tmp:
         folder = Path(tmp)
-        images = download_images(pd, folder)
+        images = download_images(d, folder)
         parts = [INSTRUCTIONS, "Image files to Read:"]
         parts += [f"- {label}: {path}" for label, path in images]
         parts += [
             "",
-            f"Title: {pd.get('text', {}).get('pageTitle', '')}",
+            f"Title: {d['title']}",
             f"Facts: {json.dumps(facts, ensure_ascii=False)}",
-            "Key features: " + "; ".join(pd.get("keyFeatures") or []),
-            "Description:\n" + strip_html(pd.get("text", {}).get("description", ""))[:6000],
+            "Key features: " + "; ".join(d["features"]),
+            "Listing details: " + "; ".join(d["facts"]),
+            "Description:\n" + d["description"][:6000],
         ]
         if notes:
             parts.append("Notes from the pre-filter: " + " ".join(notes))
@@ -502,7 +413,7 @@ def listing_message(rec, prefix=""):
     """Returns (caption, follow-up) in Telegram HTML."""
     s = rec.get("ai") or {}
     head = (f"{prefix}<b>{s.get('score', '?')}/10 · £{rec['price']:,} pcm</b>\n"
-            f"<a href=\"{rec['url']}\">{esc(rec['address'])}</a>\n"
+            f"<a href=\"{rec['url']}\">{esc(rec['address'])}</a> · {esc(rec.get('site', 'Rightmove'))}\n"
             f"<i>{esc(s.get('one_liner') or 'Not scored - have a look yourself.')}</i>")
     lines = [head, ""]
     if rec["price"] > config.BUDGET:
@@ -568,87 +479,121 @@ def save_state(st):
 
 # -------------------------------------------------------------------- Main
 
-def last_touched(p):
-    stamps = [p.get("firstVisibleDate"), (p.get("listingUpdate") or {}).get("listingUpdateDate")]
-    return max(dt.datetime.fromisoformat(x.replace("Z", "+00:00")) for x in stamps if x)
-
-
-def collect_new(st, backfill_days):
-    """Walk newest-first until a whole page is already known (or too old)."""
-    first_run = not st["seen"]
+def collect_new(src, st, backfill_days):
+    """Walk one site newest-first until a whole page is already known (or too old)."""
+    mine = [k for k in st["seen"] if sources.source_of(k) is src]
+    first_run = not mine
+    # Older Rightmove records have no map pin, which the cross-site duplicate check
+    # needs: walk the whole search once to fill them in.
+    fill_pins = src.name == "rm" and mine and not st.get("rm_pins_filled")
     cutoff = None
     if backfill_days is not None:
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=backfill_days)
+    elif first_run and src.name != "rm":
+        # A new site: score what it listed in the last few days, record the rest
+        # (they're mostly on Rightmove already, and this would otherwise be ~1,000 flats).
+        cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=NEW_SOURCE_DAYS)
     fresh, reduced = [], []
-    for page in range(MAX_PAGES):
-        props, total = search_page(page * 24)
-        if page == 0:
-            print(f"Search has {total} live listings")
-        if not props:
-            break
+    recent = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+    for cards in src.pages(42 if fill_pins else MAX_PAGES):
         page_had_new = False
-        for p in props:
-            pid = str(p["id"])
-            first_vis = dt.datetime.fromisoformat(p["firstVisibleDate"].replace("Z", "+00:00"))
-            known = st["seen"].get(pid)
-            if known and cutoff and known.get("route") == "baseline":
+        for c in cards:
+            if not sources.in_search_area(c):
+                continue
+            known = st["seen"].get(c["key"])
+            if known and c.get("lat") is not None and "lat" not in known:
+                known.update(lat=c["lat"], lon=c["lon"], beds=c["beds"])
+            if known and backfill_days is not None and known.get("route") == "baseline":
                 known = None  # --backfill re-scores listings the first run only recorded
             if known:
-                if monthly(p) < known.get("price", 10**9):
-                    reduced.append(p)
+                was = known.get("card_price", known.get("price"))
+                if c["price"] and was and c["price"] < was - 5:  # weekly->monthly rounding
+                    reduced.append(c)
                     page_had_new = True
                 continue
-            if cutoff and first_vis < cutoff:
+            if cutoff and (c["listed"] is None or c["listed"] < cutoff):
+                if first_run:
+                    st["seen"][c["key"]] = baseline_record(c)
+                    page_had_new = True
                 continue
-            if first_run and cutoff is None:
-                # First ever run without --backfill: remember, don't flood.
-                st["seen"][pid] = {"price": monthly(p), "route": "baseline"}
+            if (first_run and cutoff is None) or (fill_pins and not (c["touched"] and c["touched"] > recent)):
+                # First ever run without --backfill, or a listing from before the bot
+                # started that only the one-off full walk reaches: remember, don't flood.
+                st["seen"][c["key"]] = baseline_record(c)
                 page_had_new = True
                 continue
-            fresh.append(p)
+            fresh.append(c)
             page_had_new = True
+        if fill_pins:
+            continue  # walk the whole search once
         if cutoff:
-            # Backfill: page past already-scored flats; stop once a whole page was
-            # last touched (listed, reduced, relisted) before the window.
-            if all(last_touched(p) < cutoff for p in props if not p.get("featuredProperty")):
+            # Backfill (or a new site): page past already-scored flats; stop once a whole
+            # page was last touched (listed, reduced, relisted) before the window.
+            touched = [c["touched"] for c in cards if not c["featured"]]
+            if all(t is None or t < cutoff for t in touched):
                 break
         elif not page_had_new:
             break
-        time.sleep(POLITE_DELAY)
+    if fill_pins:
+        st["rm_pins_filled"] = True
     # de-dup (featured listings repeat on every page)
-    seen_ids, out = set(), []
-    for p in fresh:
-        if str(p["id"]) not in seen_ids:
-            seen_ids.add(str(p["id"]))
-            out.append(p)
+    seen_keys, out = set(), []
+    for c in fresh:
+        if c["key"] not in seen_keys:
+            seen_keys.add(c["key"])
+            out.append(c)
     return out, reduced
 
 
-def process(p, st, tg, force_send=False):
-    pid = str(p["id"])
-    url = f"https://www.rightmove.co.uk/properties/{pid}"
-    pd = listing_detail(pid)
-    time.sleep(POLITE_DELAY)
-    text = " ".join([pd.get("text", {}).get("pageTitle", "") or "",
-                     strip_html(pd.get("text", {}).get("description", "")),
-                     " ".join(pd.get("keyFeatures") or [])])
-    loc = pd.get("location") or p.get("location") or {}
-    lat, lon = loc.get("latitude"), loc.get("longitude")
-    pin_exact = (loc.get("pinType") or "") == "ACCURATE_POINT"
+def baseline_record(c):
+    return {"price": c["price"], "route": "baseline", "lat": c["lat"], "lon": c["lon"], "beds": c["beds"]}
+
+
+def find_duplicate(c, st):
+    """A flat already seen on another site: same beds, same rent, pins close together.
+    Only across sites; two listings on one site are two listings."""
+    if c.get("lat") is None or not c.get("price"):
+        return None
+    for k, v in st["seen"].items():
+        if v.get("lat") is None or not v.get("price") or sources.source_of(k).name == c["source"]:
+            continue
+        if v.get("beds") and c.get("beds") and v["beds"] != c["beds"]:
+            continue
+        if abs(v["price"] - c["price"]) > max(25, 0.02 * c["price"]):
+            continue
+        if km(c["lat"], c["lon"], v["lat"], v["lon"]) <= DUPE_KM:
+            return k
+    return None
+
+
+def record_duplicate(c, dup_of, st):
+    other = st["seen"][dup_of]
+    st["seen"][c["key"]] = {**baseline_record(c), "route": "duplicate", "dup_of": dup_of}
+    st.setdefault("duplicates", []).append({
+        "url": c["url"], "site": sources.BY_NAME[c["source"]].label, "address": c["address"] or other.get("address", ""),
+        "price": c["price"], "of_url": other.get("url") or f"https://www.rightmove.co.uk/properties/{dup_of}",
+        "of_site": sources.source_of(dup_of).label, "of_route": other.get("route")})
+    print(f"  = {c['key']} {c['address']}: same flat as {dup_of} ({other.get('route')})")
+
+
+def process(c, st, tg, force_send=False):
+    src = sources.BY_NAME[c["source"]]
+    d = src.detail(c)
+    time.sleep(src.delay)
+    text = " ".join([d["title"], d["description"], " ".join(d["features"]), " ".join(d["facts"])])
+    lat, lon, pin_exact = d["lat"], d["lon"], d["pin_exact"]
     his_min, his_legs = his_commute(lat, lon) if lat else (None, [])
     her_min, her_legs = her_commute(lat, lon) if lat else (None, [])
     hockey = hockey_commutes(lat, lon) if lat else []
     his_route, her_route = legs_text(his_legs, his_min), legs_text(her_legs, her_min)
-    lettings = pd.get("lettings") or {}
+    lettings = d["lettings"]
 
     rec = {
-        "id": pid, "url": url, "price": monthly(p),
-        "address": (p.get("displayAddress") or pd.get("address", {}).get("displayAddress") or "")
-                   .replace("\n", " ").replace(" ,", ","),
-        "listed": p.get("firstVisibleDate", ""), "available": lettings.get("letAvailableDate"),
+        "id": c["key"], "url": c["url"], "site": src.label, "price": d["price"],
+        "address": (d["address"] or "").replace("\n", " ").replace(" ,", ","),
+        "listed": c["listed"].isoformat() if c.get("listed") else "", "available": lettings.get("letAvailableDate"),
         "his_min": his_min, "his_route": his_route, "her_min": her_min, "her_route": her_route,
-        "hockey": hockey,
-        "photo": ((pd.get("images") or [{}])[0].get("resizedImageUrls") or {}).get("size656x437"),
+        "hockey": hockey, "photo": d["photo"],
     }
     reason, notes = hard_filter(text, lettings, his_min, pin_exact)
     if his_min and config.HIS_MAX_MINUTES < his_min <= config.HIS_HARD_LIMIT_MINUTES:
@@ -661,21 +606,20 @@ def process(p, st, tg, force_send=False):
 
     if reason:
         rec["route"] = "filtered"
-        st["filtered"].append({"id": pid, "url": url, "reason": reason, "address": rec["address"],
+        st["filtered"].append({"id": c["key"], "url": c["url"], "reason": reason, "address": rec["address"],
                                "price": rec["price"]})
-        print(f"  ✗ {pid} {rec['address']}: {reason}")
+        print(f"  ✗ {c['key']} {rec['address']}: {reason}")
     else:
         facts = {
-            "rent_pcm": rec["price"], "address": rec["address"],
+            "rent_pcm": rec["price"], "address": rec["address"], "listed_on": src.label,
             "furnish_type": lettings.get("furnishType"), "available": rec["available"],
             "deposit": lettings.get("deposit"), "min_term_months": lettings.get("minimumTermInMonths"),
-            "size": (pd.get("sizings") or [])[:2],
-            "nearest_stations": [f"{s['name']} {s['distance']:.2f} mi" for s in (pd.get("nearestStations") or [])],
+            "size": d["sizings"], "nearest_stations": d["stations"],
             f"{config.HIS_NAME}_commute_min": his_min, f"{config.HIS_NAME}_route": his_route,
             f"{config.HER_NAME}_commute_min": her_min, f"{config.HER_NAME}_route": her_route,
             "budget_pcm": config.BUDGET, f"{config.HER_NAME}_max_commute_min": config.HER_MAX_MINUTES,
         }
-        ai, model = score_listing(pd, facts, notes)  # ClaudeUnavailable propagates: flat stays unseen
+        ai, model = score_listing(d, facts, notes)  # ClaudeUnavailable propagates: flat stays unseen
         rec["ai"] = ai.model_dump() if ai else None
         rec["model"] = model if ai else None
         if force_send:
@@ -683,31 +627,35 @@ def process(p, st, tg, force_send=False):
             verdict = "would be sent instantly" if is_instant(rec) else "would go to the 6pm digest"
             rec["notes"].append(f"Manual check: the bot {verdict}.")
             tg.listing(rec["photo"], *listing_message(rec, prefix="🔎 Manual check · "))
-            print(f"  ? {pid} {rec['address']}: {ai.score if ai else '?'}/10 ({model}) - {verdict}")
+            print(f"  ? {c['key']} {rec['address']}: {ai.score if ai else '?'}/10 ({model}) - {verdict}")
         elif is_instant(rec):
             rec["route"] = "instant"
             tg.listing(rec["photo"], *listing_message(rec))
-            print(f"  ★ {pid} {rec['address']}: {ai.score}/10 ({model}) -> sent now")
+            print(f"  ★ {c['key']} {rec['address']}: {ai.score}/10 ({model}) -> sent now")
         else:
             rec["route"] = "digest"
             st["digest"].append(rec)
-            print(f"  · {pid} {rec['address']}: {ai.score if ai else '?'}/10 ({model}) -> digest")
+            print(f"  · {c['key']} {rec['address']}: {ai.score if ai else '?'}/10 ({model}) -> digest")
 
-    st["seen"][pid] = {"price": rec["price"], "route": rec["route"],
-                       "score": (rec.get("ai") or {}).get("score"), "address": rec["address"],
-                       "first_seen": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                       "ai": rec.get("ai"), "his_min": his_min, "her_min": her_min,
-                       "his_route": his_route, "her_route": her_route, "hockey": hockey, "available": rec["available"], "photo": rec["photo"]}
+    st["seen"][c["key"]] = {"price": rec["price"], "card_price": c.get("price") or rec["price"],
+                            "route": rec["route"], "url": c["url"], "site": src.label,
+                            "lat": lat, "lon": lon, "beds": c.get("beds"),
+                            "score": (rec.get("ai") or {}).get("score"), "address": rec["address"],
+                            "first_seen": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                            "ai": rec.get("ai"), "his_min": his_min, "her_min": her_min,
+                            "his_route": his_route, "her_route": her_route, "hockey": hockey,
+                            "available": rec["available"], "photo": rec["photo"]}
 
 
-def handle_reduction(p, st, tg):
-    pid = str(p["id"])
-    known = st["seen"][pid]
-    old, new = known["price"], monthly(p)
-    known["price"] = new
-    if known.get("route") in ("filtered", "baseline"):
+def handle_reduction(c, st, tg):
+    known = st["seen"][c["key"]]
+    old_card = known.get("card_price", known["price"])
+    old = known["price"]
+    new = round(old * c["price"] / old_card) if old_card else c["price"]  # card prices can be weekly-derived
+    known["price"], known["card_price"] = new, c["price"]
+    if known.get("route") in ("filtered", "baseline", "duplicate"):
         return
-    rec = {"id": pid, "url": f"https://www.rightmove.co.uk/properties/{pid}", "price": new,
+    rec = {"id": c["key"], "url": c["url"], "site": sources.BY_NAME[c["source"]].label, "price": new,
            "address": known.get("address", ""), "ai": known.get("ai"), "his_min": known.get("his_min"),
            "her_min": known.get("her_min"), "her_route": known.get("her_route"),
            "his_route": known.get("his_route"), "hockey": known.get("hockey"),
@@ -729,6 +677,7 @@ def send_digest(st, tg):
     shown = shown[:config.DIGEST_MAX_ITEMS]
     hidden = len(st["digest"]) - len(shown)
     filtered = st["filtered"]
+    dupes = st.get("duplicates") or []
 
     lines = [f"<b>🗂 Near misses · {today}</b>"]
     for r in shown:
@@ -749,10 +698,15 @@ def send_digest(st, tg):
         tail.append(f"{len(filtered)} removed by filters: " + "; ".join(
             f"<a href=\"{f['url']}\">{esc(f['address'][:30])}</a> ({esc(f['reason'].split(' (')[0])})"
             for f in filtered[:5]) + (" …" if len(filtered) > 5 else ""))
+    if dupes:
+        tail.append(f"{len(dupes)} also listed on another site (not re-scored): " + "; ".join(
+            f"<a href=\"{x['url']}\">{esc(x['address'][:30])}</a> ({esc(x['site'])}) = "
+            f"<a href=\"{x['of_url']}\">{esc(x['of_site'])}</a>"
+            for x in dupes[:5]) + (" …" if len(dupes) > 5 else ""))
     if tail:
         lines += ["", "\n".join(tail)]
     tg.text("\n".join(lines)[:4000])
-    st["digest"], st["filtered"], st["last_digest"] = [], [], today
+    st["digest"], st["filtered"], st["duplicates"], st["last_digest"] = [], [], [], today
 
 
 def main():
@@ -761,31 +715,66 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--digest-now", action="store_true")
     ap.add_argument("--limit", type=int, default=None, help="process at most N listings (testing)")
-    ap.add_argument("--only", default=None, help="score these listing ids (comma-separated) and post them")
+    ap.add_argument("--only", default=None,
+                    help="score these listings and post them: Rightmove ids, or zp:/otm:/or: keys, comma-separated")
+    ap.add_argument("--sources", default=None, help="only check these sites this run, e.g. zp,or (testing)")
     args = ap.parse_args()
 
     st = load_state()
     tg = Telegram(args.dry_run)
 
     if args.only:
-        for pid in args.only.split(","):
-            pid = pid.strip()
-            card = {"id": pid, "price": {"amount": int(listing_detail(pid)["prices"]["primaryPrice"]
-                                                    .replace("£", "").replace(",", "").split()[0]),
-                                         "frequency": "monthly"},
-                    "displayAddress": "", "firstVisibleDate": ""}
-            st["seen"].pop(pid, None)
+        for key in args.only.split(","):
+            key = key.strip()
+            src = sources.source_of(key)
+            card = src.card_for_id(key.split(":", 1)[-1])
+            st["seen"].pop(card["key"], None)
             process(card, st, tg, force_send=True)
         save_state(st)
         return
-    fresh, reduced = ([], []) if args.digest_now else collect_new(st, args.backfill)
-    cap = args.limit or (400 if args.backfill else MAX_NEW_PER_RUN)
-    if len(fresh) > cap:
-        print(f"Capping {len(fresh)} new listings to {cap} this run (rest picked up next run)")
-        fresh = fresh[:cap]
-    print(f"{len(fresh)} new listing(s), {len(reduced)} price drop(s)")
-    for p in fresh:
+
+    fresh, reduced = [], []
+    srcs = [s for s in sources.enabled() if not args.sources or s.name in args.sources.split(",")]
+    checked = failed = 0
+    for src in [] if args.digest_now else srcs:
+        ok, why = src.available()
+        if not ok:
+            print(f"{src.label}: skipped ({why})")
+            continue
+        checked += 1
+        fails = st.setdefault("source_fails", {})
         try:
+            f, r = collect_new(src, st, args.backfill)
+        except Exception as e:  # one site failing must not stop the others
+            failed += 1
+            fails[src.name] = fails.get(src.name, 0) + 1
+            print(f"{src.label} failed ({fails[src.name]} in a row): {e}", file=sys.stderr)
+            today = dt.datetime.now(LONDON).date().isoformat()
+            if fails[src.name] >= SOURCE_WARN_AFTER and st.get("source_warned", {}).get(src.name) != today:
+                tg.text(f"⚠️ Flat hunter can't read {src.label} (last {fails[src.name]} checks): "
+                        f"{esc(str(e)[:150])}. The other sites are still being checked.")
+                st.setdefault("source_warned", {})[src.name] = today
+            continue
+        fails[src.name] = 0
+        print(f"{src.label}: {len(f)} new, {len(r)} price drop(s)")
+        fresh += f
+        reduced += r
+    if checked and failed == checked:
+        save_state(st)
+        raise SystemExit("every site failed this check")  # keeper.sh counts it towards its warning
+
+    cap = args.limit or (400 if args.backfill else MAX_NEW_PER_RUN)
+    print(f"{len(fresh)} new listing(s), {len(reduced)} price drop(s)")
+    done = 0
+    for p in fresh:
+        if done >= cap:
+            print(f"Capped at {cap} this run; {len(fresh) - fresh.index(p)} left for the next run")
+            break
+        try:
+            if p["source"] != "rm" and (dup := find_duplicate(p, st)):
+                record_duplicate(p, dup, st)  # free: doesn't count towards the cap
+                continue
+            done += 1
             process(p, st, tg)
         except ClaudeUnavailable as e:
             print(f"Claude unavailable, stopping; unscored flats retry next run: {e}", file=sys.stderr)
@@ -797,14 +786,14 @@ def main():
                 st["claude_warned"] = today
             break
         except Exception as e:
-            print(f"  ! {p['id']} failed: {e}", file=sys.stderr)
+            print(f"  ! {p['key']} failed: {e}", file=sys.stderr)
         save_state(st)  # survive a crash mid-run
     for p in reduced:
         handle_reduction(p, st, tg)
 
     now = dt.datetime.now(LONDON)
     if args.digest_now or (now.hour >= config.DIGEST_HOUR_LONDON and st.get("last_digest") != now.date().isoformat()
-                           and (st["digest"] or st["filtered"])):
+                           and (st["digest"] or st["filtered"] or st.get("duplicates"))):
         send_digest(st, tg)
     save_state(st)
 
