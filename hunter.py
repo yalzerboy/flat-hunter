@@ -471,7 +471,7 @@ def load_state():
 
 
 def save_state(st):
-    st["proxy_meter"] = {k: v for k, v in sources.meter.items() if k != "check"}
+    st["proxy_meter"] = {k: v for k, v in sources.meter.items() if k != "check"}  # incl. the working exit
     STATE_PATH.parent.mkdir(exist_ok=True)
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(st, indent=1, ensure_ascii=False))
