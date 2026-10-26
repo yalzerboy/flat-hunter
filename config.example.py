@@ -7,6 +7,23 @@ SEARCH_URL = (
     "?locationIdentifier=STATION%5E0000&sortType=6&minBedrooms=2&maxPrice=3000&radius=3"
 )
 
+# The same search on the other sites: run it on each site and paste the URL.
+# Zoopla: sort by newest (results_sort=newest_listings). OnTheMarket: sort-field=update_date.
+# A site with no URL here is skipped.
+OTM_SEARCH_URL = ("https://www.onthemarket.com/to-rent/2-bed-property/some-area/"
+                  "?min-price=2000&max-price=3000&radius=3.0&sort-field=update_date")
+ZOOPLA_SEARCH_URL = ("https://www.zoopla.co.uk/to-rent/property/station/rail/some-station/"
+                     "?beds_min=2&price_frequency=per_month&price_min=2000&price_max=3000&radius=3"
+                     "&results_sort=newest_listings&search_source=to-rent")
+OPENRENT_SEARCH_URL = ("https://www.openrent.co.uk/properties-to-rent/some-area?term=Some%20Area"
+                       "&prices_min=2000&prices_max=3000&bedrooms_min=2&within=5")
+# The search circle and limits. OpenRent's page lists everything nearby, so these are
+# applied here; every other site's results are also kept to the circle.
+SEARCH = {"centre": (51.5000, -0.1200), "radius_miles": 3, "min_price": 2000,
+          "max_price": 3000, "min_beds": 2, "max_beds": 2}
+# Which sites to check (default: all). rm = Rightmove, otm = OnTheMarket, zp = Zoopla, or = OpenRent.
+# SOURCES = ["rm", "otm", "zp", "or"]
+
 # ---- People ----
 HIS_NAME = "Alex"
 HER_NAME = "Sam"

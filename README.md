@@ -1,13 +1,27 @@
 # Flat hunter
 
-Watches a Rightmove search every 30 minutes (GitHub Actions), drops only listings
-that objectively break a dealbreaker, has Claude read every remaining listing
-(text, floorplan, photos) and posts to a Telegram group:
+Watches Rightmove, OnTheMarket, Zoopla and OpenRent every 30 minutes (GitHub Actions),
+drops only listings that objectively break a dealbreaker, has Claude read every remaining
+listing (text, floorplan, photos) and posts to a Telegram group:
 
 - **Instantly:** score 7+/10 with confirmed outdoor space.
 - **6pm digest:** near misses, best first, plus what the hard filters removed
   (so you can check they're not throwing away good flats).
 - **Price drops** on flats that scored 6+.
+
+## Sites
+Each site is an adapter in `sources.py` that turns its search and listing pages into one
+shape, so filtering, commutes, scoring and messages are the same for all of them.
+
+- **Rightmove, OnTheMarket:** read directly.
+- **Zoopla, OpenRent:** both refuse GitHub's servers (403 / 405, whatever the browser
+  fingerprint), so on Actions their pages go through a residential proxy in the `PROXY_URL`
+  secret (`http://user:pass@host:port`). Without it they are skipped there. Photos come from
+  CDNs that don't block, so they never use the proxy. From a home connection both work direct.
+- **The same flat on two sites** (same bedrooms, rent within 2%, map pins within 250 m) is
+  scored once. The copy is listed in the 6pm digest with both links, so a wrong match is visible.
+- **A site's first run** scores what it listed in the last 3 days and records the rest.
+- One site failing doesn't stop the others; after 3 hours of failures it posts a warning.
 
 ## Hard filters (only when the listing says so explicitly)
 - Basement / lower ground floor flat
@@ -27,7 +41,7 @@ Nothing personal is committed in the clear:
 
 Secrets: `CONFIG_PY`, `STATE_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 (`python setup_telegram.py`), `CLAUDE_CODE_OAUTH_TOKEN` (`./setup_claude.sh`),
-optional `TFL_APP_KEY`.
+optional `TFL_APP_KEY`, optional `PROXY_URL` (Zoopla + OpenRent).
 
 ## Scoring
 Two-stage via the Claude Code CLI on a Claude subscription
@@ -35,7 +49,9 @@ Two-stage via the Claude Code CLI on a Claude subscription
 Opus re-reads any Haiku scores 5+ or is unsure about outdoor space.
 
 ## Manual runs
-Actions tab > Flat hunt > Run workflow, with args like `--backfill 3` or `--digest-now`.
+Actions tab > Flat hunt > Run workflow, with args like `--backfill 3`, `--digest-now`,
+`--only zp:66358330` (score one listing and post it; Rightmove ids are bare, others are
+`otm:`, `zp:`, `or:`) or `--sources otm,zp`.
 
 ## Schedule
 GitHub's own `schedule:` trigger is best-effort and skipped up to nine hours at a time, so

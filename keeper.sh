@@ -1,6 +1,6 @@
 #!/bin/bash
 # The run loop. GitHub's schedule trigger is best-effort and skipped up to nine
-# hours at a time, so one job stays up and checks Rightmove every 30 minutes
+# hours at a time, so one job stays up and checks the sites every 30 minutes
 # itself, 06:00-23:30 London. Before the job's 6-hour limit it starts its own
 # successor (workflow_dispatch from GITHUB_TOKEN is allowed to start runs), so
 # the chain never depends on the schedule; the schedule only restarts a broken

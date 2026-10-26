@@ -1,1 +1,2 @@
 pydantic>=2.7
+curl_cffi>=0.7
