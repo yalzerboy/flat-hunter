@@ -74,11 +74,11 @@ _browser = None
 PROXY_HOSTS = {"www.zoopla.co.uk", "www.openrent.co.uk"}
 PROXY_CAP_MB = {"check": 25, "day": 150, "month": 2000}
 REQUEST_OVERHEAD = 8 * 1024
-# Zoopla's Cloudflare refuses most of the pool's UK exits (26 Oct: 7 of 8 got 403) but
-# not all. PROXY_URL may carry "{session}" (Evomi: user:pass_country-GB_session-{session}
+# Zoopla's Cloudflare refuses most of the pool's UK exits (26 Oct: 7 of 8 from the Mac,
+# 11 of 12 from a GitHub runner got 403) but not all. PROXY_URL may carry "{session}" (Evomi: user:pass_country-GB_session-{session}
 # _lifetime-1440@host:port) so a 403 tries a fresh exit, and one that works is kept,
 # across checks, until it stops working.
-EXIT_TRIES = 12
+EXIT_TRIES = 30   # a refused try costs ~14 KB on the meter; 30 of them fail together <5% of the time
 meter = {"day": "", "month": "", "check": 0, "day_bytes": 0, "month_bytes": 0, "session": ""}
 
 
