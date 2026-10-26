@@ -471,6 +471,7 @@ def load_state():
 
 
 def save_state(st):
+    st["proxy_meter"] = {k: v for k, v in sources.meter.items() if k != "check"}
     STATE_PATH.parent.mkdir(exist_ok=True)
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(st, indent=1, ensure_ascii=False))
@@ -722,6 +723,7 @@ def main():
 
     st = load_state()
     tg = Telegram(args.dry_run)
+    sources.load_meter(st.get("proxy_meter"), dt.datetime.now(LONDON).date().isoformat())
 
     if args.only:
         for key in args.only.split(","):
@@ -745,6 +747,15 @@ def main():
         fails = st.setdefault("source_fails", {})
         try:
             f, r = collect_new(src, st, args.backfill)
+        except sources.ProxyCapReached as e:
+            # Not a failure: the budget is doing its job. Say so once a day.
+            print(f"{src.label}: paused, {e}")
+            today = dt.datetime.now(LONDON).date().isoformat()
+            if "check" not in str(e) and st.get("proxy_cap_warned") != today:
+                tg.text(f"ℹ️ Flat hunter: {esc(str(e))}. Zoopla and OpenRent are paused until it resets; "
+                        f"Rightmove and OnTheMarket carry on.")
+                st["proxy_cap_warned"] = today
+            continue
         except Exception as e:  # one site failing must not stop the others
             failed += 1
             fails[src.name] = fails.get(src.name, 0) + 1
@@ -791,6 +802,10 @@ def main():
     for p in reduced:
         handle_reduction(p, st, tg)
 
+    m = sources.meter
+    if m["day_bytes"]:
+        print(f"Proxy (counted generously): {m['check'] / 1048576:.1f} MB this check, "
+              f"{m['day_bytes'] / 1048576:.1f} MB today, {m['month_bytes'] / 1048576:.0f} MB this month")
     now = dt.datetime.now(LONDON)
     if args.digest_now or (now.hour >= config.DIGEST_HOUR_LONDON and st.get("last_digest") != now.date().isoformat()
                            and (st["digest"] or st["filtered"] or st.get("duplicates"))):
