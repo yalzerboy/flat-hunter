@@ -18,6 +18,12 @@ shape, so filtering, commutes, scoring and messages are the same for all of them
   fingerprint), so on Actions their pages go through a residential proxy in the `PROXY_URL`
   secret (`http://user:pass@host:port`). Without it they are skipped there. Photos come from
   CDNs that don't block, so they never use the proxy. From a home connection both work direct.
+- **Proxy limits** (`sources.py`, "Proxy limits"): the proxy is a shared paid pool, so only
+  Zoopla and OpenRent pages may use it (any other host is refused), and a meter stops proxied
+  fetches at 25 MB per check, 150 MB per day and 2,000 MB per month. The meter over-counts
+  (unzipped size plus 8 KB per request, retries included); real use is a fraction of it.
+  Hitting the day or month cap posts one notice and pauses only those two sites. Errors never
+  carry the proxy's credentials. A normal check is about 1-2 MB on the meter.
 - **The same flat on two sites** (same bedrooms, rent within 2%, map pins within 250 m) is
   scored once. The copy is listed in the 6pm digest with both links, so a wrong match is visible.
 - **A site's first run** scores what it listed in the last 3 days and records the rest.

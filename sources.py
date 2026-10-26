@@ -61,19 +61,81 @@ def get(url, headers=None, binary=False, tries=3):
 
 _browser = None
 
+# ------------------------------------------------------------- Proxy limits
+#
+# The proxy is a shared, paid residential pool (it also runs Alertix's ticket
+# watchers), so the bot's use of it is fenced in hard:
+# - only these hosts ever go through it; anything else raises;
+# - a meter counts every proxied request and stops proxied fetches at a cap per
+#   check, per day and per month (London time). The meter over-counts on purpose:
+#   it charges the decompressed page (the wire carries it gzipped, ~5x smaller)
+#   plus 8 KB per request for CONNECT and the TLS handshake, retries included.
+# Capped or not, photos never use the proxy.
+PROXY_HOSTS = {"www.zoopla.co.uk", "www.openrent.co.uk"}
+PROXY_CAP_MB = {"check": 25, "day": 150, "month": 2000}
+REQUEST_OVERHEAD = 8 * 1024
+meter = {"day": "", "month": "", "check": 0, "day_bytes": 0, "month_bytes": 0}
+
+
+class ProxyCapReached(Exception):
+    """The proxy budget is spent: proxied sites wait for the next check/day/month."""
+
+
+def load_meter(saved, today):
+    """Carry the day/month totals over from the state; a new check starts at 0."""
+    meter.update(saved or {})
+    meter["check"] = 0
+    if meter["day"] != today:
+        meter.update(day=today, day_bytes=0)
+    if meter["month"] != today[:7]:
+        meter.update(month=today[:7], month_bytes=0)
+
+
+def _charge(n):
+    meter["check"] += n
+    meter["day_bytes"] += n
+    meter["month_bytes"] += n
+
+
+def _check_budget():
+    for scope, used in (("check", meter["check"]), ("day", meter["day_bytes"]), ("month", meter["month_bytes"])):
+        if used >= PROXY_CAP_MB[scope] * 1024 * 1024:
+            raise ProxyCapReached(f"proxy cap for this {scope} reached ({used / 1048576:.0f} MB "
+                                  f"of {PROXY_CAP_MB[scope]} MB, counted generously)")
+
+
+def _redact(e):
+    """Never let the proxy's credentials reach a log or a Telegram message."""
+    s = str(e)
+    for secret in filter(None, [os.environ.get("PROXY_URL"),
+                                urllib.parse.urlsplit(os.environ.get("PROXY_URL", "")).password]):
+        s = s.replace(secret, "***")
+    return RuntimeError(re.sub(r"//[^@/\s]+@", "//***@", s))
+
 
 def browser_get(url, proxied=False, tries=3):
-    """A request that looks like Safari (Zoopla's Cloudflare rejects urllib and Chrome's
-    TLS fingerprint), optionally through the residential proxy."""
+    """A request that looks like Safari on an iPhone (Zoopla's Cloudflare rejects urllib,
+    and since 26 Oct 2026 desktop Safari, Chrome and Firefox fingerprints too), optionally
+    through the residential proxy."""
     global _browser
     from curl_cffi import requests as cf
     if _browser is None:
-        _browser = cf.Session(impersonate="safari")
+        _browser = cf.Session(impersonate="safari17_2_ios")
     proxy = os.environ.get("PROXY_URL") if proxied else None
+    if proxy and urllib.parse.urlsplit(url).hostname not in PROXY_HOSTS:
+        raise RuntimeError(f"refusing to proxy {urllib.parse.urlsplit(url).hostname}: not in PROXY_HOSTS")
     kw = {"proxies": {"http": proxy, "https": proxy}} if proxy else {}
     for attempt in range(tries):
+        if proxy:
+            _check_budget()
         try:
-            r = _browser.get(url, timeout=40, headers={"Accept-Language": "en-GB,en;q=0.9"}, **kw)
+            try:
+                r = _browser.get(url, timeout=40, headers={"Accept-Language": "en-GB,en;q=0.9"}, **kw)
+            finally:
+                if proxy:  # charged whether or not it worked
+                    got = locals().get("r")
+                    _charge(REQUEST_OVERHEAD + (len(got.content) + sum(len(k) + len(v) for k, v in got.headers.items())
+                                                if got is not None else 0))
             if r.status_code in (404, 410):
                 raise LookupError(f"{r.status_code} {url}")
             if r.status_code == 200:
@@ -82,7 +144,7 @@ def browser_get(url, proxied=False, tries=3):
         except LookupError:
             raise
         except Exception as e:  # curl errors, proxy hiccups
-            err = e
+            err = _redact(e) if proxy else e
         if attempt == tries - 1:
             raise err
         # A 429 means slow down properly; anything else is worth a quick retry.
@@ -404,7 +466,9 @@ class Zoopla(Source):
             "photo": photos[0].replace("/u/1024/768/", "/645/430/") if photos else None,
             "stations": [], "sizings": [],
             "price": price or card.get("price"),
-            "address": d.get("displayAddress") or card.get("address", ""),
+            # Some agents hide the street on Zoopla; the postcode district is still worth showing.
+            "address": d.get("displayAddress") or card.get("address") or
+                       f"{(d.get('location') or {}).get('outcode', '')} (street not shown on Zoopla)".strip(),
             "lat": coords.get("latitude", card.get("lat")), "lon": coords.get("longitude", card.get("lon")),
             "pin_exact": False,
         }
