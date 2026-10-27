@@ -457,8 +457,14 @@ def is_instant(rec):
     s = rec.get("ai")
     if not s or s["outdoor_space"] not in config.OUTDOOR_OK:
         return False
-    stretch = rec["price"] > config.BUDGET or (rec.get("her_min") or 0) > config.HER_MAX_MINUTES
-    need = config.OVER_BUDGET_MIN_SCORE if stretch else config.INSTANT_MIN_SCORE
+    need = config.INSTANT_MIN_SCORE
+    if rec["price"] > config.BUDGET:
+        # A little over budget (up to STRETCH_BUDGET) needs a very good flat; beyond that, exceptional.
+        stretch_to = getattr(config, "STRETCH_BUDGET", config.BUDGET)
+        need = getattr(config, "STRETCH_MIN_SCORE", config.OVER_BUDGET_MIN_SCORE) \
+            if rec["price"] <= stretch_to else config.OVER_BUDGET_MIN_SCORE
+    if (rec.get("her_min") or 0) > config.HER_MAX_MINUTES:
+        need = max(need, config.OVER_BUDGET_MIN_SCORE)
     return s["score"] >= need
 
 

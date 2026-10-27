@@ -30,7 +30,9 @@ HER_NAME = "Sam"
 
 # ---- Rent ----
 BUDGET = 2500                 # realistic budget; the search itself can go higher
-OVER_BUDGET_MIN_SCORE = 9     # over budget only pings instantly if it's exceptional
+STRETCH_BUDGET = 2600         # a little over budget, up to this...
+STRETCH_MIN_SCORE = 8         # ...pings instantly at this score
+OVER_BUDGET_MIN_SCORE = 9     # further over budget only pings instantly if it's exceptional
 
 # ---- Commutes (fastest route, weekday morning) ----
 HIS_WORK = "EC1A1BB"         # postcode
