@@ -29,7 +29,11 @@ shape, so filtering, commutes, scoring and messages are the same for all of them
   exit (up to 30 tries, ~14 KB each on the meter) and one that works is kept across checks.
 - **The same flat on two sites** (same bedrooms, rent within 2%, map pins within 250 m) is
   scored once. The copy is listed in the 6pm digest with both links, so a wrong match is visible.
-- **A site's first run** scores what it listed in the last 3 days and records the rest.
+- **One-beds near the centre** (optional `ONE_BED` in config): a second, smaller search on
+  each site that has a URL for it, kept to `max_miles` of the centre. Scored as a one-bed
+  (no study needed) and sent only at `min_score` or better, marked "🛏 1-bed"; below that
+  they're recorded, never put in the digest. Run as `rm:1bed`, `otm:1bed`, `or:1bed`.
+- **A site's (or search's) first run** scores what it listed in the last 3 days and records the rest.
 - One site failing doesn't stop the others; after 3 hours of failures it posts a warning.
 
 ## Hard filters (only when the listing says so explicitly)
@@ -60,7 +64,7 @@ Opus re-reads any Haiku scores 5+ or is unsure about outdoor space.
 ## Manual runs
 Actions tab > Flat hunt > Run workflow, with args like `--backfill 3`, `--digest-now`,
 `--only zp:66358330` (score one listing and post it; Rightmove ids are bare, others are
-`otm:`, `zp:`, `or:`) or `--sources otm,zp`.
+`otm:`, `zp:`, `or:`; add `--one-bed` to score it as a one-bed) or `--sources otm,zp,rm:1bed`.
 
 ## Schedule
 GitHub's own `schedule:` trigger is best-effort and skipped up to nine hours at a time, so
