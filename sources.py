@@ -15,6 +15,7 @@ proxy. Without it those two are skipped there; from a home connection they work 
 Photos come from CDNs that don't block, so they never use the proxy.
 """
 
+import copy
 import datetime as dt
 import json
 import math
@@ -179,10 +180,11 @@ def km(lat1, lon1, lat2, lon2):
     return math.hypot(dx, dy)
 
 
-def in_search_area(card):
-    if card.get("lat") is None or not SEARCH:
+def in_search_area(card, search=None):
+    search = search or SEARCH
+    if card.get("lat") is None or not search:
         return True  # can't tell: keep it
-    return km(*SEARCH["centre"], card["lat"], card["lon"]) <= SEARCH["radius_miles"] * 1.609 + 0.2
+    return km(*search["centre"], card["lat"], card["lon"]) <= search["radius_miles"] * 1.609 + 0.2
 
 
 def strip_html(s):
@@ -206,6 +208,20 @@ class Source:
     delay = POLITE_DELAY
 
     config_url = None  # the config.py setting with this site's search URL
+    search = SEARCH    # area, rent and beds the results are kept to
+    variant = ""       # "1bed" for the one-bed search (one_bed_sources)
+
+    @property
+    def tag(self):
+        """Names this search in state (failure counts, first runs): "rm", "rm:1bed"."""
+        return f"{self.name}:{self.variant}" if self.variant else self.name
+
+    @property
+    def title(self):
+        return f"{self.label} (1-bed)" if self.variant == "1bed" else self.label
+
+    def in_area(self, card):
+        return in_search_area(card, self.search)
 
     def available(self):
         """(ok, reason when not)."""
@@ -231,15 +247,18 @@ class Rightmove(Source):
     def key(self, native_id):
         return str(native_id)
 
+    def search_url(self):
+        return config.SEARCH_URL
+
     def pages(self, max_pages):
         for page in range(max_pages):
-            html = get(config.SEARCH_URL + f"&index={page * 24}")
+            html = get(self.search_url() + f"&index={page * 24}")
             m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
             if not m:
                 raise RuntimeError("Rightmove search page changed shape (no __NEXT_DATA__)")
             sr = json.loads(m.group(1))["props"]["pageProps"]["searchResults"]
             if page == 0:
-                print(f"Rightmove: {sr['resultCount']} live listings")
+                print(f"{self.title}: {sr['resultCount']} live listings")
             if not sr["properties"]:
                 return
             yield [self.card(p) for p in sr["properties"]]
@@ -342,7 +361,7 @@ class OnTheMarket(Source):
             html = browser_get(self.search_url() + (f"&page={page}" if page > 1 else ""))
             results = next_data(html)["props"]["pageProps"]["initialReduxState"]["results"]
             if page == 1:
-                print(f"OnTheMarket: {results.get('totalResults')} live listings")
+                print(f"{self.title}: {results.get('totalResults')} live listings")
             if not results["list"]:
                 return
             yield [self.card(p) for p in results["list"]]
@@ -424,7 +443,7 @@ class Zoopla(Source):
                 raise RuntimeError("Zoopla search page changed shape (no regularListingsFormatted)")
             if page == 1:
                 m = re.search(r'"totalResults":(\d+)', rsc) or re.search(r'"resultCount":(\d+)', rsc)
-                print(f"Zoopla: {m.group(1) if m else '?'} live listings")
+                print(f"{self.title}: {m.group(1) if m else '?'} live listings")
             featured = rsc_array(rsc, "featuredListingsFormatted") or []
             cards = [self.card(p) for p in regular + featured if isinstance(p, dict) and p.get("listingId")]
             if not regular:
@@ -549,9 +568,9 @@ class OpenRent(Source):
         for i, pid in enumerate(ids):
             if shared[i] == "1" or live[i] != "1":
                 continue
-            if not (SEARCH["min_price"] <= (prices[i] or 0) <= SEARCH["max_price"]):
+            if not (self.search["min_price"] <= (prices[i] or 0) <= self.search["max_price"]):
                 continue
-            if not (SEARCH["min_beds"] <= (beds[i] or 0) <= SEARCH.get("max_beds", 99)):
+            if not (self.search["min_beds"] <= (beds[i] or 0) <= self.search.get("max_beds", 99)):
                 continue
             listed = dt.datetime.fromtimestamp(first[i] / 1000, dt.timezone.utc) if first[i] else None
             cards.append({"key": self.key(pid), "source": self.name, "id": pid,
@@ -559,7 +578,7 @@ class OpenRent(Source):
                           "beds": beds[i], "lat": lats[i], "lon": lons[i], "listed": listed,
                           "touched": listed, "address": "", "featured": False})
         cards.sort(key=lambda c: c["listed"] or dt.datetime.min.replace(tzinfo=dt.timezone.utc), reverse=True)
-        print(f"OpenRent: {len(cards)} matching listings (of {len(ids)} on the page)")
+        print(f"{self.title}: {len(cards)} matching listings (of {len(ids)} on the page)")
         # Hand them over in pages of 24 so the stop-when-a-page-is-known rule works the same.
         for i in range(0, len(cards), 24):
             yield cards[i:i + 24]
@@ -617,6 +636,26 @@ BY_NAME = {s.name: s for s in ALL}
 def enabled():
     names = getattr(config, "SOURCES", None)
     return [s for s in ALL if names is None or s.name in names]
+
+
+def one_bed_sources():
+    """The one-bed search (config.ONE_BED): a second, smaller search on each site that has a
+    URL for it. Same listing keys as the main search, so a flat is never seen twice."""
+    ob = getattr(config, "ONE_BED", None)
+    if not ob or not SEARCH:
+        return []
+    out = []
+    for s in enabled():
+        url = ob["urls"].get(s.name)
+        if not url:
+            continue
+        v = copy.copy(s)
+        v.variant = "1bed"
+        v.search_url = lambda url=url: url
+        v.search = {**SEARCH, "radius_miles": ob["max_miles"], "min_beds": 1, "max_beds": 1,
+                    "min_price": ob.get("min_price", 0), "max_price": ob.get("max_price", SEARCH["max_price"])}
+        out.append(v)
+    return out
 
 
 def source_of(key):

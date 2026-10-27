@@ -24,6 +24,15 @@ SEARCH = {"centre": (51.5000, -0.1200), "radius_miles": 3, "min_price": 2000,
 # Which sites to check (default: all). rm = Rightmove, otm = OnTheMarket, zp = Zoopla, or = OpenRent.
 # SOURCES = ["rm", "otm", "zp", "or"]
 
+# Optional: a second, smaller search for one-beds right next to the search centre. They're
+# scored as one-beds, never go to the digest, and only ping at min_score or better (budget
+# and commute rules still apply). Run each search with 1 bedroom and paste the URLs.
+# ONE_BED = {
+#     "max_miles": 0.5, "min_score": 8, "min_price": 1750, "max_price": 3000,
+#     "urls": {"rm": "https://www.rightmove.co.uk/property-to-rent/find.html?...&minBedrooms=1&maxBedrooms=1&radius=0.5",
+#              "otm": "https://www.onthemarket.com/to-rent/1-bed-property/some-area/?max-bedrooms=1&sort-field=update_date"},
+# }
+
 # ---- People ----
 HIS_NAME = "Alex"
 HER_NAME = "Sam"

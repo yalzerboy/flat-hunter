@@ -39,6 +39,11 @@ MAX_NEW_PER_RUN = 60    # a normal 30-min window has ~2 per site; more means sta
 NEW_SOURCE_DAYS = 3     # a site's first run scores what it listed this recently, records the rest
 DUPE_KM = 0.25          # same flat on two sites: same beds, same rent (±2%), pins this close
 SOURCE_WARN_AFTER = 6   # failed checks in a row (3 hours) before a site's failure is posted
+ONE_BED = getattr(config, "ONE_BED", None) or {}
+ONE_BED_NOTE = ("This is a ONE-bedroom flat, a few minutes' walk from King's Cross St Pancras. We'd only "
+                "swap the study for that location if the flat is amazing. Judge it as a one-bed: don't mark "
+                "it down for having no second bedroom (second_bedroom = none), but hold it to a high bar on "
+                "space, light, outdoor space and character. Score 8+ only for a genuinely great one-bed.")
 
 
 # ------------------------------------------------------------ Hard filters
@@ -209,7 +214,7 @@ class Score(BaseModel):
     score: int = Field(description="1-10 fit for us. 7+ means worth booking a viewing.")
     outdoor_space: Outdoor
     outdoor_evidence: str = Field(description="Where you saw it: text, floorplan, or photo number.")
-    second_bedroom: Literal["double", "small_double", "single_only", "box_room", "unclear"]
+    second_bedroom: Literal["double", "small_double", "single_only", "box_room", "none", "unclear"]
     second_bedroom_size: str = Field(description="From the floorplan if shown, e.g. 10'2 x 9'6, else empty.")
     light: Literal["excellent", "good", "average", "poor", "unclear"]
     ceilings: Literal["high", "normal", "low", "unclear"]
@@ -330,6 +335,8 @@ def score_listing(d, facts, notes):
         ]
         if notes:
             parts.append("Notes from the pre-filter: " + " ".join(notes))
+        if d.get("one_bed"):
+            parts.append(ONE_BED_NOTE)
         prompt = "\n".join(parts)
 
         first = ask_claude(config.SCREEN_MODEL, "low", prompt, tmp)
@@ -425,7 +432,11 @@ def listing_message(rec, prefix=""):
         lines.append(f"🌿 {OUTDOOR_LABEL.get(s['outdoor_space'], s['outdoor_space'])}")
         lines.append(f"☀️ Light: {esc(s.get('light', '?'))} · ceilings: {esc(s.get('ceilings', '?'))} · "
                      f"living room: {esc(s.get('living_room', '?').replace('_', ' '))}")
-        lines.append(f"🖥 Study / 2nd bed: {study}")
+        if rec.get("one_bed"):
+            near = f", {rec['kx_miles']} mi from King's Cross St Pancras" if rec.get("kx_miles") is not None else ""
+            lines.append(f"🛏 One bedroom (no study){near}")
+        else:
+            lines.append(f"🖥 Study / 2nd bed: {study}")
         lines.append(f"🏠 {esc(s.get('furnished'))} · floor {esc(s.get('floor'))} · lift {esc(s.get('lift'))}")
     lines.append(f"📅 Available {esc(rec.get('available') or 'not stated')}")
     if s.get("highlights"):
@@ -465,6 +476,8 @@ def is_instant(rec):
             if rec["price"] <= stretch_to else config.OVER_BUDGET_MIN_SCORE
     if (rec.get("her_min") or 0) > config.HER_MAX_MINUTES:
         need = max(need, config.OVER_BUDGET_MIN_SCORE)
+    if rec.get("one_bed"):
+        need = max(need, ONE_BED.get("min_score", 8))
     return s["score"] >= need
 
 
@@ -488,15 +501,20 @@ def save_state(st):
 
 def collect_new(src, st, backfill_days):
     """Walk one site newest-first until a whole page is already known (or too old)."""
-    mine = [k for k in st["seen"] if sources.source_of(k) is src]
-    first_run = not mine
-    # Older Rightmove records have no map pin, which the cross-site duplicate check
-    # needs: walk the whole search once to fill them in.
-    fill_pins = src.name == "rm" and mine and not st.get("rm_pins_filled")
+    if src.variant:
+        # A second search on a site we already read: its first run is still a first run.
+        first_run = src.tag not in st.get("searches_started", [])
+        fill_pins = False
+    else:
+        mine = [k for k in st["seen"] if sources.source_of(k) is src]
+        first_run = not mine
+        # Older Rightmove records have no map pin, which the cross-site duplicate check
+        # needs: walk the whole search once to fill them in.
+        fill_pins = src.name == "rm" and mine and not st.get("rm_pins_filled")
     cutoff = None
     if backfill_days is not None:
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=backfill_days)
-    elif first_run and src.name != "rm":
+    elif first_run and (src.name != "rm" or src.variant):
         # A new site: score what it listed in the last few days, record the rest
         # (they're mostly on Rightmove already, and this would otherwise be ~1,000 flats).
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=NEW_SOURCE_DAYS)
@@ -505,8 +523,9 @@ def collect_new(src, st, backfill_days):
     for cards in src.pages(42 if fill_pins else MAX_PAGES):
         page_had_new = False
         for c in cards:
-            if not sources.in_search_area(c):
+            if not src.in_area(c):
                 continue
+            c["one_bed"] = src.variant == "1bed"
             known = st["seen"].get(c["key"])
             if known and c.get("lat") is not None and "lat" not in known:
                 known.update(lat=c["lat"], lon=c["lon"], beds=c["beds"])
@@ -543,6 +562,8 @@ def collect_new(src, st, backfill_days):
             break
     if fill_pins:
         st["rm_pins_filled"] = True
+    if src.variant and first_run:
+        st.setdefault("searches_started", []).append(src.tag)
     # de-dup (featured listings repeat on every page)
     seen_keys, out = set(), []
     for c in fresh:
@@ -595,8 +616,9 @@ def process(c, st, tg, force_send=False):
     his_route, her_route = legs_text(his_legs, his_min), legs_text(her_legs, her_min)
     lettings = d["lettings"]
 
+    one_bed = bool(c.get("one_bed"))
     rec = {
-        "id": c["key"], "url": c["url"], "site": src.label, "price": d["price"],
+        "id": c["key"], "url": c["url"], "site": src.label, "price": d["price"], "one_bed": one_bed,
         "address": (d["address"] or "").replace("\n", " ").replace(" ,", ","),
         "listed": c["listed"].isoformat() if c.get("listed") else "", "available": lettings.get("letAvailableDate"),
         "his_min": his_min, "his_route": his_route, "her_min": her_min, "her_route": her_route,
@@ -610,6 +632,8 @@ def process(c, st, tg, force_send=False):
     if his_min and his_min > config.HIS_HARD_LIMIT_MINUTES and not pin_exact:
         notes.append(f"TfL says {his_min} min for {config.HIS_NAME}, but the map pin is approximate.")
     rec["notes"] = notes
+    if one_bed and lat:
+        rec["kx_miles"] = round(km(*sources.SEARCH["centre"], lat, lon) / 1.609, 1)
 
     if reason:
         rec["route"] = "filtered"
@@ -626,7 +650,7 @@ def process(c, st, tg, force_send=False):
             f"{config.HER_NAME}_commute_min": her_min, f"{config.HER_NAME}_route": her_route,
             "budget_pcm": config.BUDGET, f"{config.HER_NAME}_max_commute_min": config.HER_MAX_MINUTES,
         }
-        ai, model = score_listing(d, facts, notes)  # ClaudeUnavailable propagates: flat stays unseen
+        ai, model = score_listing({**d, "one_bed": one_bed}, facts, notes)  # ClaudeUnavailable propagates: flat stays unseen
         rec["ai"] = ai.model_dump() if ai else None
         rec["model"] = model if ai else None
         if force_send:
@@ -637,8 +661,11 @@ def process(c, st, tg, force_send=False):
             print(f"  ? {c['key']} {rec['address']}: {ai.score if ai else '?'}/10 ({model}) - {verdict}")
         elif is_instant(rec):
             rec["route"] = "instant"
-            tg.listing(rec["photo"], *listing_message(rec))
+            tg.listing(rec["photo"], *listing_message(rec, prefix="🛏 1-bed · " if one_bed else ""))
             print(f"  ★ {c['key']} {rec['address']}: {ai.score}/10 ({model}) -> sent now")
+        elif one_bed:
+            rec["route"] = "one_bed_pass"  # one-beds only ever ping; no digest
+            print(f"  · {c['key']} {rec['address']}: 1-bed {ai.score if ai else '?'}/10 ({model}) -> below the bar")
         else:
             rec["route"] = "digest"
             st["digest"].append(rec)
@@ -651,7 +678,7 @@ def process(c, st, tg, force_send=False):
                             "first_seen": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                             "ai": rec.get("ai"), "his_min": his_min, "her_min": her_min,
                             "his_route": his_route, "her_route": her_route, "hockey": hockey,
-                            "available": rec["available"], "photo": rec["photo"]}
+                            "available": rec["available"], "photo": rec["photo"], "one_bed": one_bed}
 
 
 def handle_reduction(c, st, tg):
@@ -662,12 +689,14 @@ def handle_reduction(c, st, tg):
     known["price"], known["card_price"] = new, c["price"]
     if known.get("route") in ("filtered", "baseline", "duplicate"):
         return
+    if known.get("one_bed") and (known.get("score") or 0) < ONE_BED.get("min_score", 8) - 1:
+        return  # one-beds only ever ping
     rec = {"id": c["key"], "url": c["url"], "site": sources.BY_NAME[c["source"]].label, "price": new,
            "address": known.get("address", ""), "ai": known.get("ai"), "his_min": known.get("his_min"),
            "her_min": known.get("her_min"), "her_route": known.get("her_route"),
            "his_route": known.get("his_route"), "hockey": known.get("hockey"),
            "available": known.get("available"), "photo": known.get("photo"),
-           "notes": [f"Price dropped £{old:,} → £{new:,}."]}
+           "one_bed": known.get("one_bed"), "notes": [f"Price dropped £{old:,} → £{new:,}."]}
     if (known.get("score") or 0) >= config.INSTANT_MIN_SCORE - 1:
         tg.listing(rec["photo"], *listing_message(rec, prefix="📉 Price drop · "))
     else:
@@ -724,7 +753,9 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="process at most N listings (testing)")
     ap.add_argument("--only", default=None,
                     help="score these listings and post them: Rightmove ids, or zp:/otm:/or: keys, comma-separated")
-    ap.add_argument("--sources", default=None, help="only check these sites this run, e.g. zp,or (testing)")
+    ap.add_argument("--sources", default=None,
+                    help="only check these searches this run, e.g. zp,or or rm:1bed (testing)")
+    ap.add_argument("--one-bed", action="store_true", help="with --only: score them as one-beds")
     args = ap.parse_args()
 
     st = load_state()
@@ -736,18 +767,20 @@ def main():
             key = key.strip()
             src = sources.source_of(key)
             card = src.card_for_id(key.split(":", 1)[-1])
+            card["one_bed"] = args.one_bed
             st["seen"].pop(card["key"], None)
             process(card, st, tg, force_send=True)
         save_state(st)
         return
 
     fresh, reduced = [], []
-    srcs = [s for s in sources.enabled() if not args.sources or s.name in args.sources.split(",")]
+    srcs = [s for s in sources.enabled() + sources.one_bed_sources()
+            if not args.sources or s.tag in args.sources.split(",")]
     checked = failed = 0
     for src in [] if args.digest_now else srcs:
         ok, why = src.available()
         if not ok:
-            print(f"{src.label}: skipped ({why})")
+            print(f"{src.title}: skipped ({why})")
             continue
         checked += 1
         fails = st.setdefault("source_fails", {})
@@ -755,7 +788,7 @@ def main():
             f, r = collect_new(src, st, args.backfill)
         except sources.ProxyCapReached as e:
             # Not a failure: the budget is doing its job. Say so once a day.
-            print(f"{src.label}: paused, {e}")
+            print(f"{src.title}: paused, {e}")
             today = dt.datetime.now(LONDON).date().isoformat()
             if "check" not in str(e) and st.get("proxy_cap_warned") != today:
                 tg.text(f"ℹ️ Flat hunter: {esc(str(e))}. Zoopla and OpenRent are paused until it resets; "
@@ -764,16 +797,16 @@ def main():
             continue
         except Exception as e:  # one site failing must not stop the others
             failed += 1
-            fails[src.name] = fails.get(src.name, 0) + 1
-            print(f"{src.label} failed ({fails[src.name]} in a row): {e}", file=sys.stderr)
+            fails[src.tag] = fails.get(src.tag, 0) + 1
+            print(f"{src.title} failed ({fails[src.tag]} in a row): {e}", file=sys.stderr)
             today = dt.datetime.now(LONDON).date().isoformat()
-            if fails[src.name] >= SOURCE_WARN_AFTER and st.get("source_warned", {}).get(src.name) != today:
-                tg.text(f"⚠️ Flat hunter can't read {src.label} (last {fails[src.name]} checks): "
+            if fails[src.tag] >= SOURCE_WARN_AFTER and st.get("source_warned", {}).get(src.tag) != today:
+                tg.text(f"⚠️ Flat hunter can't read {src.title} (last {fails[src.tag]} checks): "
                         f"{esc(str(e)[:150])}. The other sites are still being checked.")
-                st.setdefault("source_warned", {})[src.name] = today
+                st.setdefault("source_warned", {})[src.tag] = today
             continue
-        fails[src.name] = 0
-        print(f"{src.label}: {len(f)} new, {len(r)} price drop(s)")
+        fails[src.tag] = 0
+        print(f"{src.title}: {len(f)} new, {len(r)} price drop(s)")
         fresh += f
         reduced += r
     if checked and failed == checked:
