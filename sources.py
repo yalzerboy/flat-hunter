@@ -210,6 +210,8 @@ class Source:
     config_url = None  # the config.py setting with this site's search URL
     search = SEARCH    # area, rent and beds the results are kept to
     variant = ""       # "1bed" for the one-bed search (one_bed_sources)
+    agent = False           # an estate agent's own site, not a portal
+    builds_own_url = False  # search URL comes from self.search, not config.py
 
     @property
     def tag(self):
@@ -629,7 +631,96 @@ class OpenRent(Source):
         }
 
 
-ALL = [Rightmove(), OnTheMarket(), Zoopla(), OpenRent()]
+# ------------------------------------------------------------------ Dexters
+
+class Dexters(Source):
+    """An estate agent's own site, read for the flats it never puts on the portals
+    (a 24-hour watch in Oct 2026: 3 of ~90 near King's Cross were nowhere else, and
+    none appeared here before the portals had them).
+
+    The map view's JSON returns every matching London flat in one response; its bedroom
+    filter is "N or more", so exactly N = N+ minus (N+1)+. No listed date anywhere, so
+    the first run can't keep to recent flats: it scores what no portal has and the
+    duplicate check records the rest."""
+    name, label = "dx", "Dexters"
+    agent = True              # Rightmove copies listed later are duplicates of these
+    builds_own_url = True     # from self.search, so the one-bed search needs no config URL
+    BASE = "https://www.dexters.co.uk"
+
+    def map_json(self, beds):
+        url = (f"{self.BASE}/property-lettings/map-of-{beds}-bedroom-flats-available-to-rent-in-london"
+               f"-between-{self.search['min_price']}-and-{self.search['max_price']}"
+               f"?format=json&layout=locratingmap")
+        return json.loads(get(url, {"Accept": "application/json"}))
+
+    def pages(self, max_pages):
+        lo, hi = self.search["min_beds"], self.search.get("max_beds", 9)
+        rows = self.map_json(lo)
+        time.sleep(self.delay)
+        too_big = {str(x["id"]) for x in self.map_json(hi + 1)}
+        cards = [c for x in rows if str(x["id"]) not in too_big and (c := self.card(x))]
+        for c in cards:
+            c["beds"] = lo if lo == hi else None  # the map only says "lo to hi"
+        n = len(cards)
+        # Keep to the circle here, as the portals' radius searches do: a page of 24 London
+        # flats with none nearby would otherwise read as "nothing new" and stop the walk.
+        cards = [c for c in cards if self.in_area(c)]
+        cards.sort(key=lambda c: int(c["id"]), reverse=True)  # ids are sequential: newest first
+        print(f"{self.title}: {len(cards)} matching listings in the area (of {n} in London)")
+        for i in range(0, len(cards), 24):
+            yield cards[i:i + 24]
+
+    def card(self, x):
+        h = x.get("html") or ""
+        price = re.search(r'data-price="(\d+)"', h)
+        url = re.search(r'href="([^"]+/property-for-rent/[^"]+)"', h)
+        status = re.search(r'class="title"[^>]*>([^<]*)', h)
+        if not (price and url) or (status and status.group(1).strip().lower() != "to rent"):
+            return None
+        unit = re.search(r'class="price-text"[^>]*>([^<]*)', h)
+        price = int(price.group(1))
+        if unit and "week" in unit.group(1).lower():
+            price = round(price * 52 / 12)
+        paras = [strip_html(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", h, re.S)]
+        address = next((p for p in paras if p and "£" not in p and p.lower() != "to rent"), "")
+        url = url.group(1).replace("\\/", "/")
+        return {"key": self.key(x["id"]), "source": self.name, "id": str(x["id"]),
+                "url": url if url.startswith("http") else self.BASE + url, "price": price,
+                "beds": None, "lat": float(x["lat"]) if x.get("lat") else None,
+                "lon": float(x["lng"]) if x.get("lng") else None,
+                "listed": None, "touched": None, "address": address, "featured": False}
+
+    def card_for_id(self, native_id):
+        # Their listing URLs carry a slug; the bare id redirects to it.
+        return {"key": self.key(native_id), "source": self.name, "id": str(native_id),
+                "url": f"{self.BASE}/property-for-rent/x/{native_id}"}
+
+    def detail(self, card):
+        html = get(card["url"])
+        body = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.S)
+        h1 = re.search(r"<h1[^>]*>(.*?)</h1>", body, re.S)
+        address = strip_html(re.sub(r"<span", ", <span", h1.group(1))) if h1 else card.get("address", "")
+        entry = re.search(r'<div class="section-entry[^"]*">(.*?)</div>', body, re.S)
+        description = strip_html(entry.group(1)) if entry else ""
+        features = [strip_html(li) for li in re.findall(r'<ul class="list-info">(.*?)</ul>', body, re.S)[:1]
+                    for li in re.findall(r"<li[^>]*>(.*?)</li>", li)]
+        price = re.search(r"/\s*£([\d,]+)\s*Pcm", strip_html(body))
+        floorplans = re.findall(r'<div class="floorplan-image">\s*<img src="([^"]+)"', html)
+        photos = list(dict.fromkeys(re.findall(
+            r'(https://[^"\' ]+rackcdn\.com/property_image\.x800\.v1/[^"\' ]+\.(?:jpe?g|png|webp))', html)))
+        return {
+            "title": f"{', '.join(features)} to rent in {address}".strip(), "description": description[:8000],
+            "features": features, "facts": [], "lettings": {},
+            "floorplans": floorplans[:3], "photos": photos, "photo": photos[0] if photos else None,
+            "stations": [], "sizings": [],
+            "price": int(price.group(1).replace(",", "")) if price else card.get("price"),
+            "address": address or card.get("address", ""),
+            "lat": card.get("lat"), "lon": card.get("lon"),
+            "pin_exact": False,  # street-level pins: two flats on Judd Street share one
+        }
+
+
+ALL = [Rightmove(), OnTheMarket(), Zoopla(), OpenRent(), Dexters()]
 BY_NAME = {s.name: s for s in ALL}
 
 
@@ -647,11 +738,12 @@ def one_bed_sources():
     out = []
     for s in enabled():
         url = ob["urls"].get(s.name)
-        if not url:
+        if not url and not s.builds_own_url:
             continue
         v = copy.copy(s)
         v.variant = "1bed"
-        v.search_url = lambda url=url: url
+        if url:
+            v.search_url = lambda url=url: url
         v.search = {**SEARCH, "radius_miles": ob["max_miles"], "min_beds": 1, "max_beds": 1,
                     "min_price": ob.get("min_price", 0), "max_price": ob.get("max_price", SEARCH["max_price"])}
         out.append(v)
