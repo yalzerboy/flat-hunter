@@ -1,6 +1,6 @@
 # Flat hunter
 
-Watches Rightmove, OnTheMarket, Zoopla and OpenRent every 30 minutes (GitHub Actions),
+Watches Rightmove, OnTheMarket, Zoopla, OpenRent and Dexters every 30 minutes (GitHub Actions),
 drops only listings that objectively break a dealbreaker, has Claude read every remaining
 listing (text, floorplan, photos) and posts to a Telegram group:
 
@@ -14,6 +14,12 @@ Each site is an adapter in `sources.py` that turns its search and listing pages 
 shape, so filtering, commutes, scoring and messages are the same for all of them.
 
 - **Rightmove, OnTheMarket:** read directly.
+- **Dexters** (an estate agent's own site): read directly, for the few flats it keeps off the
+  portals. A 24-hour watch of six agents' sites (Oct 2026) found no agent listing before the
+  portals, and only Dexters with flats near King's Cross that no portal had. Its flats that
+  are already on a portal are recorded as duplicates; a Rightmove copy that appears after the
+  Dexters one is a duplicate too. It has no listed dates, so its first run scores every flat
+  no portal has.
 - **Zoopla, OpenRent:** both refuse GitHub's servers (403 / 405, whatever the browser
   fingerprint), so on Actions their pages go through a residential proxy in the `PROXY_URL`
   secret (`http://user:pass@host:port`). Without it they are skipped there. Photos come from

@@ -514,7 +514,7 @@ def collect_new(src, st, backfill_days):
     cutoff = None
     if backfill_days is not None:
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=backfill_days)
-    elif first_run and (src.name != "rm" or src.variant):
+    elif first_run and (src.name != "rm" or src.variant) and not src.agent:
         # A new site: score what it listed in the last few days, record the rest
         # (they're mostly on Rightmove already, and this would otherwise be ~1,000 flats).
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=NEW_SOURCE_DAYS)
@@ -526,6 +526,9 @@ def collect_new(src, st, backfill_days):
             if not src.in_area(c):
                 continue
             c["one_bed"] = src.variant == "1bed"
+            # An agent's site has no listed dates: its first run scores what no portal has,
+            # and the duplicate check records the rest without listing them in the digest.
+            c["quiet_dupe"] = first_run and src.agent
             known = st["seen"].get(c["key"])
             if known and c.get("lat") is not None and "lat" not in known:
                 known.update(lat=c["lat"], lon=c["lon"], beds=c["beds"])
@@ -542,7 +545,7 @@ def collect_new(src, st, backfill_days):
                     st["seen"][c["key"]] = baseline_record(c)
                     page_had_new = True
                 continue
-            if (first_run and cutoff is None) or (fill_pins and not (c["touched"] and c["touched"] > recent)):
+            if (first_run and cutoff is None and not src.agent) or (fill_pins and not (c["touched"] and c["touched"] > recent)):
                 # First ever run without --backfill, or a listing from before the bot
                 # started that only the one-off full walk reaches: remember, don't flood.
                 st["seen"][c["key"]] = baseline_record(c)
@@ -577,13 +580,16 @@ def baseline_record(c):
     return {"price": c["price"], "route": "baseline", "lat": c["lat"], "lon": c["lon"], "beds": c["beds"]}
 
 
-def find_duplicate(c, st):
+def find_duplicate(c, st, agents_only=False):
     """A flat already seen on another site: same beds, same rent, pins close together.
-    Only across sites; two listings on one site are two listings."""
+    Only across sites; two listings on one site are two listings. agents_only (for
+    Rightmove) matches only flats an agent's own site had first and the bot scored."""
     if c.get("lat") is None or not c.get("price"):
         return None
     for k, v in st["seen"].items():
         if v.get("lat") is None or not v.get("price") or sources.source_of(k).name == c["source"]:
+            continue
+        if agents_only and not (sources.source_of(k).agent and v.get("route") not in ("duplicate", "baseline")):
             continue
         if v.get("beds") and c.get("beds") and v["beds"] != c["beds"]:
             continue
@@ -597,6 +603,8 @@ def find_duplicate(c, st):
 def record_duplicate(c, dup_of, st):
     other = st["seen"][dup_of]
     st["seen"][c["key"]] = {**baseline_record(c), "route": "duplicate", "dup_of": dup_of}
+    if c.get("quiet_dupe"):
+        return
     st.setdefault("duplicates", []).append({
         "url": c["url"], "site": sources.BY_NAME[c["source"]].label, "address": c["address"] or other.get("address", ""),
         "price": c["price"], "of_url": other.get("url") or f"https://www.rightmove.co.uk/properties/{dup_of}",
@@ -821,7 +829,7 @@ def main():
             print(f"Capped at {cap} this run; {len(fresh) - fresh.index(p)} left for the next run")
             break
         try:
-            if p["source"] != "rm" and (dup := find_duplicate(p, st)):
+            if dup := find_duplicate(p, st, agents_only=p["source"] == "rm"):
                 record_duplicate(p, dup, st)  # free: doesn't count towards the cap
                 continue
             done += 1
