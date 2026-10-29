@@ -416,11 +416,59 @@ def esc(s):
     return html_escape(str(s or ""), quote=False)
 
 
+MOVE_IN = getattr(config, "MOVE_IN", None)  # (earliest, latest) ISO dates, or None
+MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def available_date(text):
+    """The sites' "available from" text as a date: "18/12/2026" (Rightmove), "18 Dec 2026"
+    (OnTheMarket), "18 December, 2026" (OpenRent), "2026-12-18"; "Now" is today."""
+    t = str(text or "").strip().lower()
+    today = dt.datetime.now(LONDON).date()
+    try:
+        if "now" in t or "immediate" in t:
+            return today
+        if m := re.search(r"(\d{4})-(\d{2})-(\d{2})", t):
+            return dt.date(*map(int, m.groups()))
+        if m := re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", t):
+            d, mo, y = map(int, m.groups())
+            return dt.date(y + 2000 if y < 100 else y, mo, d)
+        if (m := re.search(r"(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3})[a-z]*,?\s+(\d{4})", t)) and m.group(2) in MONTHS:
+            return dt.date(int(m.group(3)), MONTHS[m.group(2)], int(m.group(1)))
+    except ValueError:
+        pass
+    return None
+
+
+def move_fit(available, short=False):
+    """Note on whether the available date suits config.MOVE_IN ("" without one);
+    short: just its emoji, for the digest."""
+    if not MOVE_IN:
+        return ""
+    if short:
+        return move_fit(available).split(" ")[0]
+    d = available_date(available)
+    if d is None:
+        return "❔ ask the agent"
+    lo, hi = (dt.date.fromisoformat(x) for x in MOVE_IN)
+    if d < lo:
+        weeks = (lo - d).days // 7
+        return f"⏳ {weeks} week{'s' if weeks != 1 else ''} before your move" if weeks else "✅ fits your move"
+    return "✅ fits your move" if d <= hi else "⌛ after your move"
+
+
+def available_line(rec):
+    fit = move_fit(rec.get("available"))
+    return f"📅 Available {esc(rec.get('available') or 'not stated')}" + (f" · {fit}" if fit else "")
+
+
 def listing_message(rec, prefix=""):
     """Returns (caption, follow-up) in Telegram HTML."""
     s = rec.get("ai") or {}
     head = (f"{prefix}<b>{s.get('score', '?')}/10 · £{rec['price']:,} pcm</b>\n"
             f"<a href=\"{rec['url']}\">{esc(rec['address'])}</a> · {esc(rec.get('site', 'Rightmove'))}\n"
+            f"{available_line(rec)}\n"
             f"<i>{esc(s.get('one_liner') or 'Not scored - have a look yourself.')}</i>")
     lines = [head, ""]
     if rec["price"] > config.BUDGET:
@@ -438,7 +486,6 @@ def listing_message(rec, prefix=""):
         else:
             lines.append(f"🖥 Study / 2nd bed: {study}")
         lines.append(f"🏠 {esc(s.get('furnished'))} · floor {esc(s.get('floor'))} · lift {esc(s.get('lift'))}")
-    lines.append(f"📅 Available {esc(rec.get('available') or 'not stated')}")
     if s.get("highlights"):
         lines.append("✅ " + esc(" · ".join(s["highlights"][:3])))
     if s.get("concerns"):
@@ -732,6 +779,7 @@ def send_digest(st, tg):
                else "")
         lines.append(f"<b>{score(r) if score(r) is not None else 'unscored'}/10</b> £{r['price']:,} · "
                      f"<a href=\"{r['url']}\">{esc(r['address'][:40])}</a> · 🌿 {out}"
+                     f" · 📅 {esc(r.get('available') or '?')}{(' ' + move_fit(r.get('available'), short=True)) if MOVE_IN else ''}"
                      + (f" · <i>{why}</i>" if why else ""))
     if not shown:
         lines.append("Nothing close today.")

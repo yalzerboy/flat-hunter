@@ -88,6 +88,9 @@ HOCKEY_VENUES = [
 INSTANT_MIN_SCORE = 7         # send straight away at or above this (within budget)...
 # ...but only when outdoor space is confirmed to be one of these.
 OUTDOOR_OK = {"private_balcony", "terrace", "roof_terrace", "private_garden", "communal_garden"}
+# Optional: your move-in window (earliest, latest). Messages then say whether each
+# flat's available date fits it.
+# MOVE_IN = ("2027-01-01", "2027-01-31")
 DIGEST_HOUR_LONDON = 18       # daily "near misses" message
 DIGEST_MIN_SCORE = 6          # only list flats scoring this or more (count the rest)
 DIGEST_MAX_ITEMS = 10
