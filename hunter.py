@@ -40,10 +40,13 @@ NEW_SOURCE_DAYS = 3     # a site's first run scores what it listed this recently
 DUPE_KM = 0.25          # same flat on two sites: same beds, same rent (±2%), pins this close
 SOURCE_WARN_AFTER = 6   # failed checks in a row (3 hours) before a site's failure is posted
 ONE_BED = getattr(config, "ONE_BED", None) or {}
-ONE_BED_NOTE = ("This is a ONE-bedroom flat, a few minutes' walk from King's Cross St Pancras. We'd only "
-                "swap the study for that location if the flat is amazing. Judge it as a one-bed: don't mark "
-                "it down for having no second bedroom (second_bedroom = none), but hold it to a high bar on "
-                "space, light, outdoor space and character. Score 8+ only for a genuinely great one-bed.")
+ONE_BED_NOTE = ("This is a ONE-bedroom flat. We'd only give up the study for a one-bed that is amazing: "
+                "a big living room with real room for a desk (a proper work corner, not squeezed in), or a "
+                "really special space (loft or warehouse, double height, huge windows, a big terrace). Judge "
+                "it as a one-bed: second_bedroom = none, and say in second_bedroom_size where a desk would go "
+                "(or that it wouldn't fit). Hold it to a high bar on space, light, outdoor space and character; "
+                "score 8+ only for a genuinely great or genuinely big one-bed.")
+NEAR_KX = getattr(config, "NEAR_KX", None) or {}  # {"miles": 0.5, "bonus": 1}
 
 
 # ------------------------------------------------------------ Hard filters
@@ -546,11 +549,18 @@ def save_state(st):
 
 # -------------------------------------------------------------------- Main
 
+def started_key(src):
+    r = src.search.get("radius_miles")
+    return src.tag if r in (None, 0.5) else f"{src.tag}@{r}mi"  # 0.5: the first one-bed circle
+
+
 def collect_new(src, st, backfill_days):
     """Walk one site newest-first until a whole page is already known (or too old)."""
     if src.variant:
         # A second search on a site we already read: its first run is still a first run.
-        first_run = src.tag not in st.get("searches_started", [])
+        # Keyed by the circle too: widening a search is a first run again (recent flats
+        # scored, older ones recorded), not hundreds of "new" flats at once.
+        first_run = started_key(src) not in st.get("searches_started", [])
         fill_pins = False
     else:
         mine = [k for k in st["seen"] if sources.source_of(k) is src]
@@ -613,7 +623,7 @@ def collect_new(src, st, backfill_days):
     if fill_pins:
         st["rm_pins_filled"] = True
     if src.variant and first_run:
-        st.setdefault("searches_started", []).append(src.tag)
+        st.setdefault("searches_started", []).append(started_key(src))
     # de-dup (featured listings repeat on every page)
     seen_keys, out = set(), []
     for c in fresh:
@@ -687,8 +697,8 @@ def process(c, st, tg, force_send=False):
     if his_min and his_min > config.HIS_HARD_LIMIT_MINUTES and not pin_exact:
         notes.append(f"TfL says {his_min} min for {config.HIS_NAME}, but the map pin is approximate.")
     rec["notes"] = notes
-    if one_bed and lat:
-        rec["kx_miles"] = round(km(*sources.SEARCH["centre"], lat, lon) / 1.609, 1)
+    if lat:
+        rec["kx_miles"] = round(km(*sources.SEARCH["centre"], lat, lon) / 1.609, 2)
 
     if reason:
         rec["route"] = "filtered"
@@ -704,10 +714,15 @@ def process(c, st, tg, force_send=False):
             f"{config.HIS_NAME}_commute_min": his_min, f"{config.HIS_NAME}_route": his_route,
             f"{config.HER_NAME}_commute_min": her_min, f"{config.HER_NAME}_route": her_route,
             "budget_pcm": config.BUDGET, f"{config.HER_NAME}_max_commute_min": config.HER_MAX_MINUTES,
+            "miles_from_kings_cross_st_pancras": rec.get("kx_miles"),
         }
         ai, model = score_listing({**d, "one_bed": one_bed}, facts, notes)  # ClaudeUnavailable propagates: flat stays unseen
         rec["ai"] = ai.model_dump() if ai else None
         rec["model"] = model if ai else None
+        if rec["ai"] and NEAR_KX and rec.get("kx_miles") is not None and rec["kx_miles"] <= NEAR_KX["miles"]:
+            # Walking distance to St Pancras is worth more than anything inside the flat.
+            rec["ai"]["score"] = min(10, rec["ai"]["score"] + NEAR_KX.get("bonus", 1))
+            rec["notes"].append(f"+{NEAR_KX.get('bonus', 1)} for being {rec['kx_miles']} mi from King's Cross St Pancras.")
         if force_send:
             rec["route"] = "digest"
             verdict = "would be sent instantly" if is_instant(rec) else "would go to the 6pm digest"
@@ -718,8 +733,8 @@ def process(c, st, tg, force_send=False):
             rec["route"] = "instant"
             tg.listing(rec["photo"], *listing_message(rec, prefix="🛏 1-bed · " if one_bed else ""))
             print(f"  ★ {c['key']} {rec['address']}: {ai.score}/10 ({model}) -> sent now")
-        elif one_bed:
-            rec["route"] = "one_bed_pass"  # one-beds only ever ping; no digest
+        elif one_bed and (ai.score if ai else 0) < ONE_BED.get("min_score", 8) - 1:
+            rec["route"] = "one_bed_pass"  # one-beds well under the bar: not even the digest
             print(f"  · {c['key']} {rec['address']}: 1-bed {ai.score if ai else '?'}/10 ({model}) -> below the bar")
         else:
             rec["route"] = "digest"
@@ -777,7 +792,8 @@ def send_digest(st, tg):
         why = ("over budget" if r["price"] > config.BUDGET
                else "outdoor space not confirmed" if s.get("outdoor_space") not in config.OUTDOOR_OK
                else "")
-        lines.append(f"<b>{score(r) if score(r) is not None else 'unscored'}/10</b> £{r['price']:,} · "
+        lines.append(f"{'🛏 1-bed · ' if r.get('one_bed') else ''}"
+                     f"<b>{score(r) if score(r) is not None else 'unscored'}/10</b> £{r['price']:,} · "
                      f"<a href=\"{r['url']}\">{esc(r['address'][:40])}</a> · 🌿 {out}"
                      f" · 📅 {esc(r.get('available') or '?')}{(' ' + move_fit(r.get('available'), short=True)) if MOVE_IN else ''}"
                      + (f" · <i>{why}</i>" if why else ""))
