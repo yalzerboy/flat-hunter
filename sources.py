@@ -184,6 +184,8 @@ def in_search_area(card, search=None):
     search = search or SEARCH
     if card.get("lat") is None or not search:
         return True  # can't tell: keep it
+    if card["lat"] < search.get("min_lat", -90) or card["lon"] > search.get("max_lon", 180):
+        return False  # south of the river / too far east (config.SEARCH)
     return km(*search["centre"], card["lat"], card["lon"]) <= search["radius_miles"] * 1.609 + 0.2
 
 
