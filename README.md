@@ -35,11 +35,15 @@ shape, so filtering, commutes, scoring and messages are the same for all of them
   exit (up to 30 tries, ~14 KB each on the meter) and one that works is kept across checks.
 - **The same flat on two sites** (same bedrooms, rent within 2%, map pins within 250 m) is
   scored once. The copy is listed in the 6pm digest with both links, so a wrong match is visible.
-- **One-beds near the centre** (optional `ONE_BED` in config): a second, smaller search on
-  each site that has a URL for it, kept to `max_miles` of the centre. Scored as a one-bed
-  (no study needed) and sent only at `min_score` or better, marked "🛏 1-bed"; below that
-  they're recorded, never put in the digest. Run as `rm:1bed`, `otm:1bed`, `or:1bed`.
-- **A site's (or search's) first run** scores what it listed in the last 3 days and records the rest.
+- **One-beds** (optional `ONE_BED` in config): a second search on each site that has a URL
+  for it, kept to `max_miles` of the centre and SEARCH's edges. Scored as a one-bed that has
+  to be amazing or big (room for a desk in the living room, or a really special space): sent
+  at `min_score` or better, marked "🛏 1-bed"; one point under goes to the digest; lower is
+  only recorded. Run as `rm:1bed`, `otm:1bed`, `or:1bed`, `dx:1bed`.
+- **Near the centre** (optional `NEAR_KX`): flats within `miles` get `bonus` points on top of
+  the AI's score, with a note saying so.
+- **A site's (or search's) first run** scores what it listed in the last 3 days and records the
+  rest. Widening a one-bed search's `max_miles` counts as a first run again.
 - One site failing doesn't stop the others; after 3 hours of failures it posts a warning.
 
 ## Hard filters (only when the listing says so explicitly)

@@ -27,11 +27,14 @@ SEARCH = {"centre": (51.5000, -0.1200), "radius_miles": 3, "min_price": 2000,
 # dx = Dexters (needs no URL: built from SEARCH, and joins the one-bed search too).
 # SOURCES = ["rm", "otm", "zp", "or", "dx"]
 
-# Optional: a second, smaller search for one-beds right next to the search centre. They're
-# scored as one-beds, never go to the digest, and only ping at min_score or better (budget
-# and commute rules still apply). Run each search with 1 bedroom and paste the URLs.
+# Optional: extra points for flats right by the search centre.
+# NEAR_KX = {"miles": 0.5, "bonus": 1}
+
+# Optional: a second search for one-beds that are amazing or big. They ping at min_score or
+# better, go to the digest one point under (budget and commute rules still apply). Run each
+# search with 1 bedroom and paste the URLs.
 # ONE_BED = {
-#     "max_miles": 0.5, "min_score": 8, "min_price": 1750, "max_price": 3000,
+#     "max_miles": 2, "min_score": 8, "min_price": 1750, "max_price": 3000,
 #     "urls": {"rm": "https://www.rightmove.co.uk/property-to-rent/find.html?...&minBedrooms=1&maxBedrooms=1&radius=0.5",
 #              "otm": "https://www.onthemarket.com/to-rent/1-bed-property/some-area/?max-bedrooms=1&sort-field=update_date"},
 # }
