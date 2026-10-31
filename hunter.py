@@ -577,6 +577,12 @@ def collect_new(src, st, backfill_days):
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=NEW_SOURCE_DAYS)
     fresh, reduced = [], []
     recent = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+    # An area added to SEARCH["extra_areas"] gets a first run of its own on each search:
+    # score what it listed in the last few days, record the rest.
+    started = st.get("searches_started", [])
+    new_areas = {a["name"] for a in src.search.get("extra_areas", [])
+                 if f"{started_key(src)}+{a['name']}" not in started}
+    area_cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=NEW_SOURCE_DAYS)
     for cards in src.pages(42 if fill_pins else MAX_PAGES):
         page_had_new = False
         for c in cards:
@@ -596,6 +602,12 @@ def collect_new(src, st, backfill_days):
                 if c["price"] and was and c["price"] < was - 5:  # weekly->monthly rounding
                     reduced.append(c)
                     page_had_new = True
+                continue
+            if (new_areas and not first_run and backfill_days is None
+                    and sources.area_of(c, src.search) in new_areas
+                    and (c["listed"] is None or c["listed"] < area_cutoff)):
+                st["seen"][c["key"]] = baseline_record(c)
+                page_had_new = True
                 continue
             if cutoff and (c["listed"] is None or c["listed"] < cutoff):
                 if first_run:
@@ -624,6 +636,8 @@ def collect_new(src, st, backfill_days):
         st["rm_pins_filled"] = True
     if src.variant and first_run:
         st.setdefault("searches_started", []).append(started_key(src))
+    for name in sorted(new_areas):
+        st.setdefault("searches_started", []).append(f"{started_key(src)}+{name}")
     # de-dup (featured listings repeat on every page)
     seen_keys, out = set(), []
     for c in fresh:
