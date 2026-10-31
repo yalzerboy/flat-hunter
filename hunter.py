@@ -630,6 +630,12 @@ def collect_new(src, st, backfill_days):
             touched = [c["touched"] for c in cards if not c["featured"]]
             if all(t is None or t < cutoff for t in touched):
                 break
+        elif new_areas and not first_run and backfill_days is None:
+            # A new area's first run: its recent flats sit among known ones from the main
+            # circle, so page on until the whole page is older than the window.
+            touched = [c["touched"] for c in cards if not c["featured"]]
+            if all(t is None or t < area_cutoff for t in touched):
+                break
         elif not page_had_new:
             break
     if fill_pins:
