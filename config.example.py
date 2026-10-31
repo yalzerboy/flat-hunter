@@ -21,6 +21,10 @@ OPENRENT_SEARCH_URL = ("https://www.openrent.co.uk/properties-to-rent/some-area?
 # applied here; every other site's results are also kept to the circle.
 SEARCH = {"centre": (51.5000, -0.1200), "radius_miles": 3, "min_price": 2000,
           "max_price": 3000, "min_beds": 2, "max_beds": 2}
+# Optional: more circles outside the main one, e.g.
+#   "extra_areas": [{"name": "little-venice", "centre": (51.526, -0.188), "radius_miles": 0.8}]
+# A new area gets its own first run on each site: recent flats scored, older ones recorded.
+# The site URLs must reach it (their radius counts from their own centre).
 # Optional edges inside the circle: "min_lat" (drop anything south of it, e.g. the river)
 # and "max_lon" (drop anything east of it).
 # Which sites to check (default: all). rm = Rightmove, otm = OnTheMarket, zp = Zoopla, or = OpenRent,

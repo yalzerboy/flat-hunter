@@ -180,13 +180,23 @@ def km(lat1, lon1, lat2, lon2):
     return math.hypot(dx, dy)
 
 
-def in_search_area(card, search=None):
+def area_of(card, search=None):
+    """"" inside the main circle (or no pin), an extra area's name, or None when outside."""
     search = search or SEARCH
     if card.get("lat") is None or not search:
-        return True  # can't tell: keep it
+        return ""  # can't tell: keep it
     if card["lat"] < search.get("min_lat", -90) or card["lon"] > search.get("max_lon", 180):
-        return False  # south of the river / too far east (config.SEARCH)
-    return km(*search["centre"], card["lat"], card["lon"]) <= search["radius_miles"] * 1.609 + 0.2
+        return None  # south of the river / too far east (config.SEARCH)
+    if km(*search["centre"], card["lat"], card["lon"]) <= search["radius_miles"] * 1.609 + 0.2:
+        return ""
+    for a in search.get("extra_areas", []):  # e.g. Little Venice and Maida Vale
+        if km(*a["centre"], card["lat"], card["lon"]) <= a["radius_miles"] * 1.609 + 0.2:
+            return a["name"]
+    return None
+
+
+def in_search_area(card, search=None):
+    return area_of(card, search) is not None
 
 
 def strip_html(s):
