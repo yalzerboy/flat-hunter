@@ -743,23 +743,24 @@ def process(c, st, tg, force_send=False):
             # Walking distance to St Pancras is worth more than anything inside the flat.
             rec["ai"]["score"] = min(10, rec["ai"]["score"] + NEAR_KX.get("bonus", 1))
             rec["notes"].append(f"+{NEAR_KX.get('bonus', 1)} for being {rec['kx_miles']} mi from King's Cross St Pancras.")
+        shown = (rec["ai"] or {}).get("score")  # with the King's Cross bonus, so routing matches the message
         if force_send:
             rec["route"] = "digest"
             verdict = "would be sent instantly" if is_instant(rec) else "would go to the 6pm digest"
             rec["notes"].append(f"Manual check: the bot {verdict}.")
             tg.listing(rec["photo"], *listing_message(rec, prefix="🔎 Manual check · "))
-            print(f"  ? {c['key']} {rec['address']}: {ai.score if ai else '?'}/10 ({model}) - {verdict}")
+            print(f"  ? {c['key']} {rec['address']}: {shown if ai else '?'}/10 ({model}) - {verdict}")
         elif is_instant(rec):
             rec["route"] = "instant"
             tg.listing(rec["photo"], *listing_message(rec, prefix="🛏 1-bed · " if one_bed else ""))
-            print(f"  ★ {c['key']} {rec['address']}: {ai.score}/10 ({model}) -> sent now")
-        elif one_bed and (ai.score if ai else 0) < ONE_BED.get("min_score", 8) - 1:
+            print(f"  ★ {c['key']} {rec['address']}: {shown}/10 ({model}) -> sent now")
+        elif one_bed and (shown or 0) < ONE_BED.get("min_score", 8) - 1:
             rec["route"] = "one_bed_pass"  # one-beds well under the bar: not even the digest
-            print(f"  · {c['key']} {rec['address']}: 1-bed {ai.score if ai else '?'}/10 ({model}) -> below the bar")
+            print(f"  · {c['key']} {rec['address']}: 1-bed {shown if ai else '?'}/10 ({model}) -> below the bar")
         else:
             rec["route"] = "digest"
             st["digest"].append(rec)
-            print(f"  · {c['key']} {rec['address']}: {ai.score if ai else '?'}/10 ({model}) -> digest")
+            print(f"  · {c['key']} {rec['address']}: {shown if ai else '?'}/10 ({model}) -> digest")
 
     st["seen"][c["key"]] = {"price": rec["price"], "card_price": c.get("price") or rec["price"],
                             "route": rec["route"], "url": c["url"], "site": src.label,
